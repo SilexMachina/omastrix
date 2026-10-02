@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""OmaStrix host snapshot. Local sysfs only. Prints one JSON object."""
+
+import glob
+import json
+import os
+import subprocess
+import sys
+
+# Stock TTM pages_limit is about 16.3M pages (~62 GiB). A ceiling at or under
+# this is the kernel default, not a Strix Halo raise.
+STOCK_PAGES_LIMIT = 17_000_000
+
+
+def read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def read_int(path):
+    text = read_text(path)
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def gib(n):
+    if n is None:
+        return None
+    return round(n / 1024**3, 2)
+
+
+def cmdline():
+    return read_text("/proc/cmdline").split()
+
+
+def pages_limit():
+    for token in cmdline():
+        if token.startswith("ttm.pages_limit="):
+            try:
+                return int(token.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def mem_total_bytes():
+    for line in read_text("/proc/meminfo").splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+def gpu_devices():
+    found = []
+    for path in sorted(glob.glob("/sys/class/drm/card*/device")):
+        card = path.split("/sys/class/drm/")[1].split("/")[0]
+        if "-" in card:
+            continue
+        if not os.path.exists(os.path.join(path, "mem_info_gtt_total")):
+            continue
+        found.append(path)
+    return found
+
+
+def lspci_name(slot):
+    if not slot:
+        return ""
+    try:
+        out = subprocess.run(
+            ["lspci", "-nn", "-s", slot],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    line = (out.stdout or "").strip().splitlines()
+    return line[0] if line else ""
+
+
+def is_strix_halo(pci, name):
+    blob = (pci + " " + name).lower()
+    if "strix halo" in blob or "strix_halo" in blob or "gfx1151" in blob:
+        return True
+    if any(token in blob for token in ("8060s", "8050s", "8040s")):
+        return True
+    # pci.ids names 1002:1586 as the Strix Halo display controller family.
+    return "1002:1586" in blob.replace("0x", "")
+
+
+def pill(used, total, default):
+    if used is None or total is None:
+        return "GTT ?"
+    mark = "!" if default else ""
+    return "%d/%dG%s" % (round(used), round(total), mark)
+
+
+def snapshot():
+    device = gpu_devices()[0] if gpu_devices() else ""
+    uevent = {}
+    if device:
+        for line in read_text(os.path.join(device, "uevent")).splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                uevent[key] = value
+    pci = (uevent.get("PCI_ID") or "").lower()
+    slot = uevent.get("PCI_SLOT_NAME") or ""
+    name = lspci_name(slot)
+    gtt_total = read_int(os.path.join(device, "mem_info_gtt_total")) if device else None
+    gtt_used = read_int(os.path.join(device, "mem_info_gtt_used")) if device else None
+    limit = pages_limit()
+    default = limit is None or limit <= STOCK_PAGES_LIMIT
+    used_g = gib(gtt_used)
+    total_g = gib(gtt_total)
+    halo = bool(device) and is_strix_halo(pci, name)
+    return {
+        "strix_halo": halo,
+        "gpu_name": name,
+        "pci": pci,
+        "slot": slot,
+        "driver": uevent.get("DRIVER") or "",
+        "gtt_used_gib": used_g,
+        "gtt_total_gib": total_g,
+        "gtt_default": default,
+        "pages_limit": limit,
+        "mem_total_gib": gib(mem_total_bytes()),
+        "pill": pill(used_g, total_g, default),
+        "vertical": "GTT" if halo else "?",
+    }
+
+
+def main():
+    verb = sys.argv[1] if len(sys.argv) > 1 else "snapshot"
+    if verb not in ("snapshot", "status"):
+        print("unknown verb: %s" % verb, file=sys.stderr)
+        return 2
+    print(json.dumps(snapshot(), separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "silexmachina.omastrix",
+  "name": "OmaStrix",
+  "version": "0.1.0",
+  "author": "SilentD",
+  "license": "MIT",
+  "description": "Strix Halo local models for Omarchy. This cut shows the host and the GTT ceiling. It does not download or load a model.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "OmaStrix",
+    "description": "GTT ceiling and Strix Halo host. Model library comes later.",
+    "category": "AI",
+    "aliases": ["omastrix", "gtt", "strix"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "refreshIntervalSec": 5 },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}
