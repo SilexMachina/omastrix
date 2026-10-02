@@ -65,7 +65,7 @@ A recipe has:
 - fit: weight, rough KV at the recipe context, anything else the recipe pins (projector, draft model)
 - serve: context, flags, optional files and whether they default off
 
-Click downloads. The plugin checks size and SHA-256, resumes a partial file, and leaves the running server alone. Click loads, with the recipe. Unfit rows stay visible and disabled, with the reason in numbers: GTT free, weight, KV, desktop reserve. Load refuses the same way if the picture changed since the panel opened. One click installs. It does not load.
+Click downloads. The plugin checks size and SHA-256, resumes a partial file, and leaves the running server alone. Click loads, with the recipe. One click installs. It does not load. A load that does not fit is refused before the server is asked, with GTT free, weight, KV, and the desktop reserve.
 
 ### Starter library
 
@@ -82,7 +82,17 @@ There is no Qwen 3.6 25B-A3B. The measured fast coder is **Qwen3.6-35B-A3B**.
 | 5 | Qwen3.8-Flash-Next | UD-IQ4_XS | 87.2 GiB | 128 GB | General, Web, Long context. Vision optional, off | `--ngram-on-disk`. No `--spec-type` and no `-md`. The shared MTP sidecar does not load on this fork. |
 | 6 | DeepSeek-V4-Flash-0731 | UD-Q2_K_XL | 90.2 GiB | 128 GB | General, Long context | The non-Qwen row. No DSpark on this recipe. |
 
-"Fits" uses the ~14 GiB unpinable reserve. A 32 GB machine keeps 4B and 9B. A 64 GB machine adds 27B and 35B-A3B. Flash-Next and V4-Flash need the 128 GB class. A row that does not fit stays listed and disabled.
+"Fits" in the table is the published tier. The widget does not trust that column alone. It reads this machine: MemTotal and the live GTT ceiling. A model fits when weight, KV at the recipe context, and the desktop reserve fit in that ceiling.
+
+The library grows by testing. A new row is added only after the pinned engine loads it on a Strix Halo machine and returns one completion. The row records that machine class. A speed number is added only when one was measured. The six above are the start.
+
+The default library view shows only models that fit this machine. The catalog names one recommended row per tier, and that row is first:
+
+- 27B does not fit: recommend Qwen3.5-9B. The test model stays in the list.
+- 27B fits and Flash-Next does not: recommend Qwen3.6-35B-A3B.
+- Flash-Next fits: recommend Qwen3.8-27B. Flash-Next and V4-Flash stay in the list. They are not first, so a new 128 GB user is not dropped onto an 87 GiB download.
+
+Other models that fit follow in catalog order. Models that do not fit are not in that list. A control, off by default, shows them under "Too large for this system," each with the shortfall in GiB. They cannot be loaded from that group.
 
 Speed numbers already measured on this Ryzen AI Max+ 395 / 128 GB box, Vulkan RADV, stay labeled that way: 35B-A3B about 55 tok/s decode, 27B Q4 about 26 tok/s with MTP, V4-Flash about 15–17 tok/s. No number yet for 4B, 9B, or Flash-Next. Those rows ship without a speed until one is measured.
 
@@ -199,4 +209,3 @@ Each cut is usable on this box before the next one starts. A cut that needs a re
 ## Still his
 
 - When the repo becomes public.
-- Whether DeepSeek-V4-Flash stays as the sixth library row. The other five are the Qwen set.
