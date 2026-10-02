@@ -12,6 +12,7 @@ Panel {
 
   property var payload: ({})
   property string errorText: ""
+  property bool settingGtt: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -19,8 +20,24 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool halo: payload.strix_halo === true
   readonly property bool gttDefault: payload.gtt_default === true
-  readonly property bool alarm: !halo || gttDefault || errorText !== ""
+  readonly property bool pending: payload.gtt_pending === true
+  readonly property string gttSet: payload.gtt_set || ""
+  readonly property string resetTip: "This change will not take place until after reset."
   readonly property string pillText: payload.pill || "GTT ?"
+  readonly property string usedText: payload.gtt_used_gib === undefined || payload.gtt_used_gib === null
+    ? "—" : payload.gtt_used_gib + " GiB"
+
+  readonly property var gttOptions: [
+    { value: "64", label: "64 GB", tooltip: root.tipFor("64") },
+    { value: "96", label: "96 GB", tooltip: root.tipFor("96") },
+    { value: "110", label: "110 GB", tooltip: root.tipFor("110") }
+  ]
+
+  function tipFor(value) {
+    if (gttSet === value && (pending || settingGtt))
+      return resetTip
+    return ""
+  }
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -50,8 +67,33 @@ Panel {
     }
   }
 
-  function gib(value) {
-    return value === undefined || value === null ? "—" : value
+  function chooseGtt(value) {
+    if (settingGtt || value === gttSet)
+      return
+    errorText = ""
+    settingGtt = true
+    setProc.command = ["pkexec", scriptPath(), "set-gtt", value]
+    setProc.running = true
+  }
+
+  function finishSet(raw, err) {
+    settingGtt = false
+    var msg = String(err || "").trim()
+    var body = String(raw || "").trim()
+    if (body.indexOf("\"success\":true") >= 0 || body.indexOf("\"success\": true") >= 0) {
+      errorText = ""
+      refresh()
+      if (bar)
+        bar.showTooltip(gttRow, resetTip)
+      return
+    }
+    if (msg !== "")
+      errorText = msg
+    else if (body !== "")
+      errorText = body
+    else
+      errorText = "GTT change was not applied"
+    refresh()
   }
 
   implicitWidth: button.implicitWidth
@@ -83,15 +125,29 @@ Panel {
     }
   }
 
+  Process {
+    id: setProc
+    stdout: StdioCollector {
+      id: setOut
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: setErr
+      waitForEnd: true
+    }
+    onRunningChanged: if (!running) root.finishSet(setOut.text, setErr.text)
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: root.pillText
-    active: root.alarm
-    fontSize: 12
+    active: !root.halo || root.gttDefault || root.errorText !== ""
+    fontSize: Style.font.title
+    horizontalMargin: 8.75
     tooltipText: root.errorText !== "" ? root.errorText
-      : (root.halo ? "OmaStrix  GTT " + root.pillText : "OmaStrix  not Strix Halo")
+      : (root.pending ? root.resetTip : "OmaStrix  GTT " + root.pillText)
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton)
         root.refresh()
@@ -107,8 +163,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(280))
+    contentWidth: panel.fittedContentWidth(Style.space(640))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(160))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -116,74 +172,74 @@ Panel {
       onCloseRequested: root.close()
       onActivateRequested: root.refresh()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) { if (t === "r" || t === "R") root.refresh() }
 
       Column {
         id: column
         width: parent.width
-        spacing: Style.space(10)
+        spacing: Style.space(12)
 
         PanelHero {
           width: parent.width
           title: "OmaStrix"
           meta: root.halo ? "Strix Halo" : "Not this host"
-          detail: root.gttDefault ? "GTT is still the kernel default" : "GTT ceiling is raised"
-          foreground: root.alarm ? root.urgent : root.foreground
+          foreground: root.halo ? root.foreground : root.urgent
           fontFamily: root.fontFamily
         }
 
-        PanelSeparator { foreground: root.foreground }
-
-        PanelSectionHeader {
-          text: "GTT"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
-
-        Text {
+        Row {
+          id: gttRow
           width: parent.width
-          text: root.gib(root.payload.gtt_used_gib) + " / " + root.gib(root.payload.gtt_total_gib) + " GiB"
-          color: root.gttDefault ? root.urgent : root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          textFormat: Text.PlainText
-        }
+          spacing: Style.space(10)
 
-        Text {
-          width: parent.width
-          wrapMode: Text.Wrap
-          text: root.gttDefault
-            ? "The ceiling is the kernel default. A later setup step can offer a raise. It will not change the boot line without a confirm."
-            : "Used and ceiling. The library, when it exists, will fit models against this ceiling."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          textFormat: Text.PlainText
-        }
+          Text {
+            text: "GTT"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
 
-        PanelSectionHeader {
-          text: "Host"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
+          Text {
+            text: "Used: " + root.usedText
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
 
-        Text {
-          width: parent.width
-          wrapMode: Text.Wrap
-          text: root.payload.gpu_name || "No amdgpu GTT device"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          textFormat: Text.PlainText
-        }
+          Text {
+            text: "/"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
 
-        Text {
-          width: parent.width
-          text: "RAM " + root.gib(root.payload.mem_total_gib) + " GiB    " + (root.payload.pci || "")
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          textFormat: Text.PlainText
+          Text {
+            text: "Max:"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          ButtonGroup {
+            id: maxBoxes
+            fontSize: Style.font.title
+            fontFamily: root.fontFamily
+            foreground: root.foreground
+            accent: Color.accent
+            options: root.gttOptions
+            value: root.gttSet
+            enabled: !root.settingGtt
+            onChanged: root.chooseGtt(value)
+            anchors.verticalCenter: parent.verticalCenter
+          }
         }
 
         Text {
@@ -193,17 +249,7 @@ Panel {
           text: root.errorText
           color: root.urgent
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          textFormat: Text.PlainText
-        }
-
-        Text {
-          width: parent.width
-          wrapMode: Text.Wrap
-          text: "No model library in this cut. Nothing is downloaded."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: Style.font.body
           textFormat: Text.PlainText
         }
       }

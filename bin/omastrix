@@ -10,6 +10,14 @@ import sys
 # Stock TTM pages_limit is about 16.3M pages (~62 GiB). A ceiling at or under
 # this is the kernel default, not a Strix Halo raise.
 STOCK_PAGES_LIMIT = 17_000_000
+LIMINE_CONF = "/etc/limine-entry-tool.d/amd-gtt.conf"
+MODPROBE_CONF = "/etc/modprobe.d/amd-gtt.conf"
+# GiB label -> 4 KiB page count, and amdgpu.gttsize in MiB.
+GTT_CHOICES = {
+    "64": {"pages": 16_777_216, "gttsize": 65_536},
+    "96": {"pages": 25_165_824, "gttsize": 98_304},
+    "110": {"pages": 28_835_840, "gttsize": 112_640},
+}
 
 
 def read_text(path):
@@ -36,6 +44,76 @@ def gib(n):
 
 def cmdline():
     return read_text("/proc/cmdline").split()
+
+
+def pages_from_text(text):
+    for part in text.split():
+        if "ttm.pages_limit=" in part:
+            raw = part.split("ttm.pages_limit=", 1)[1]
+            raw = raw.split()[0].strip("\"'")
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+        if part.startswith("pages_limit="):
+            try:
+                return int(part.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def choice_for_pages(pages):
+    if pages is None:
+        return ""
+    for label, spec in GTT_CHOICES.items():
+        if spec["pages"] == pages:
+            return label
+    return ""
+
+
+def configured_pages():
+    # The boot files are the setting. Cmdline is what is live until reset.
+    for path in (LIMINE_CONF, MODPROBE_CONF):
+        pages = pages_from_text(read_text(path))
+        if pages:
+            return pages
+    return pages_limit()
+
+
+def file_bodies(label):
+    spec = GTT_CHOICES[label]
+    pages = spec["pages"]
+    gttsize = spec["gttsize"]
+    limine = (
+        "# OmaStrix GTT ceiling: %s GiB.\n"
+        "# pages_limit is 4 KiB pages.\n"
+        "KERNEL_CMDLINE[default]+=\" ttm.pages_limit=%d ttm.page_pool_size=%d "
+        "amdgpu.gttsize=%d amdgpu.vm_size=256\"\n"
+    ) % (label, pages, pages, gttsize)
+    modprobe = (
+        "# OmaStrix GTT ceiling: %s GiB. vm_size is GPU VA space in GB, not a RAM steal.\n"
+        "options ttm pages_limit=%d page_pool_size=%d\n"
+        "options amdgpu gttsize=%d vm_size=256\n"
+    ) % (label, pages, pages, gttsize)
+    return limine, modprobe
+
+
+def write_gtt(label):
+    limine, modprobe = file_bodies(label)
+    for path, body in ((LIMINE_CONF, limine), (MODPROBE_CONF, modprobe)):
+        tmp = path + ".omastrix-tmp"
+        with open(tmp, "w") as fh:
+            fh.write(body)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    built = subprocess.run(["limine-mkinitcpio"], capture_output=True, text=True)
+    if built.returncode != 0:
+        err = (built.stderr or built.stdout or "limine-mkinitcpio failed").strip()
+        print(json.dumps({"success": False, "error": err}))
+        return 1
+    print(json.dumps({"success": True, "gtt_set": label, "pending": True}))
+    return 0
 
 
 def pages_limit():
@@ -115,10 +193,20 @@ def snapshot():
     gtt_total = read_int(os.path.join(device, "mem_info_gtt_total")) if device else None
     gtt_used = read_int(os.path.join(device, "mem_info_gtt_used")) if device else None
     limit = pages_limit()
+    configured = configured_pages()
+    choice = choice_for_pages(configured) or choice_for_pages(limit)
+    live_choice = choice_for_pages(None)
+    # Live ceiling matches a box when it is within half a GiB of that size.
+    if gtt_total:
+        for label in ("64", "96", "110"):
+            if abs(gtt_total - int(label) * 1024**3) < 512 * 1024**2:
+                live_choice = label
+                break
     default = limit is None or limit <= STOCK_PAGES_LIMIT
     used_g = gib(gtt_used)
     total_g = gib(gtt_total)
     halo = bool(device) and is_strix_halo(pci, name)
+    pending = bool(choice) and choice != live_choice
     return {
         "strix_halo": halo,
         "gpu_name": name,
@@ -128,6 +216,9 @@ def snapshot():
         "gtt_used_gib": used_g,
         "gtt_total_gib": total_g,
         "gtt_default": default,
+        "gtt_set": choice,
+        "gtt_live": live_choice,
+        "gtt_pending": pending,
         "pages_limit": limit,
         "mem_total_gib": gib(mem_total_bytes()),
         "pill": pill(used_g, total_g, default),
@@ -137,11 +228,23 @@ def snapshot():
 
 def main():
     verb = sys.argv[1] if len(sys.argv) > 1 else "snapshot"
-    if verb not in ("snapshot", "status"):
-        print("unknown verb: %s" % verb, file=sys.stderr)
-        return 2
-    print(json.dumps(snapshot(), separators=(",", ":")))
-    return 0
+    if verb in ("snapshot", "status"):
+        print(json.dumps(snapshot(), separators=(",", ":")))
+        return 0
+    if verb == "set-gtt":
+        if len(sys.argv) < 3 or sys.argv[2] not in GTT_CHOICES:
+            print("set-gtt needs 64, 96, or 110", file=sys.stderr)
+            return 2
+        label = sys.argv[2]
+        if "--print" in sys.argv:
+            limine, modprobe = file_bodies(label)
+            print(json.dumps({"limine": limine, "modprobe": modprobe}))
+            return 0
+        if os.geteuid() != 0:
+            os.execvp("pkexec", ["pkexec", os.path.abspath(__file__), "set-gtt", label])
+        return write_gtt(label)
+    print("unknown verb: %s" % verb, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
