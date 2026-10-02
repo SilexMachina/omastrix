@@ -33,8 +33,8 @@ Users of this plugin are expected to have an AI agent on the machine. The repo a
 
 1. `omarchy plugin add <repo url> --enable`
 2. Open OmaStrix on the bar.
-3. **Set up OmaStrix.** One wizard. Ends with a real completion from a small model.
-4. Open the catalog. Click a recommended model to download it. Click load when it fits.
+3. **Set up OmaStrix.** One wizard. Ends when the engine is built and `llama-cli --list-devices` shows RADV and a GTT-sized heap. It does not download a model.
+4. Open the library. The first row is the Recommended Test Model. Click it to download. Click load when it fits.
 
 Adding the plugin only copies files and checks the manifest. Omarchy does not run plugin code at install. Setup is a button. The plugin process never runs as root. A step that needs a password opens a terminal and uses Omarchy's own prompt, and the prompt names the step.
 
@@ -47,11 +47,9 @@ Ordered. Each step shows what it found and what it is about to do. A failed step
    The change is two files, the same pattern already used here: a Limine drop-in under `/etc/limine-entry-tool.d/` and a modprobe file under `/etc/modprobe.d/`, then `limine-mkinitcpio`. The user confirms. Reboot is a separate confirm. The wizard does not reboot by itself. After reboot it checks `/proc/cmdline` and `mem_info_gtt_total` before calling the step done.
 3. **Build tools.** `omarchy pkg` installs what the Vulkan build needs: compiler, cmake, ninja, vulkan-headers, vulkan-tools, spirv-headers. Configure fails without spirv-headers.
 4. **Engine.** Clone `halo-box/strix-llama.cpp` at a pinned tag or commit recorded in this repo. Build Vulkan/RADV. Install wrappers in `~/.local/bin`. Do not export `VK_DRIVER_FILES` or `AMD_VULKAN_ICD` into the session. Omarchy ships an NVIDIA ICD for Hyprland and Steam even when no NVIDIA GPU is present; a session-wide pin hides it.
-   Verify with `llama-cli --list-devices`. Expect RADV and a heap about the size of the GTT ceiling. That check is the pass/fail for this step.
-5. **Proof model.** Download one small dense instruct GGUF, under about 5 GB, pinned revision, size and SHA-256 checked. First candidate to evaluate is a small Qwen3 instruct, because this fork already parses that family. The filename is not locked in this brief. The proof model exists to produce one completion. It is not the daily recommendation.
-6. **Serve and prove.** Start the router on `127.0.0.1:8080`, one slot, the proof model loaded with its recipe. Send one short completion. Show the answer and the measured speed. Core setup is done.
+   Verify with `llama-cli --list-devices`. Expect RADV and a heap about the size of the GTT ceiling. That check is the pass/fail for this step. Core setup is done.
 
-Downloads do not load. The proof load is the one exception, and it is the last step of setup, after the user has watched the earlier steps.
+Setup does not download a model and does not start the server. The Recommended Test Model is the first library row. The user clicks download. A later click loads it.
 
 ## Catalog and recipes
 
@@ -67,9 +65,26 @@ A recipe has:
 - fit: weight, rough KV at the recipe context, anything else the recipe pins (projector, draft model)
 - serve: context, flags, optional files and whether they default off
 
-Click downloads. The plugin checks size and SHA-256, resumes a partial file, and leaves the running server alone. Click loads, with the recipe. Unfit rows stay visible and disabled, with the reason in numbers: GTT free, weight, KV, desktop reserve. Load refuses the same way if the picture changed since the panel opened.
+Click downloads. The plugin checks size and SHA-256, resumes a partial file, and leaves the running server alone. Click loads, with the recipe. Unfit rows stay visible and disabled, with the reason in numbers: GTT free, weight, KV, desktop reserve. Load refuses the same way if the picture changed since the panel opened. One click installs. It does not load.
 
-Tiers follow the live machine. A model that does not fit is still listed, so the user can see what a larger Strix Halo box is for. It cannot be started.
+### Starter library
+
+Six rows. One quant each, all Unsloth. The first row is the Recommended Test Model: a badge, a download button, no automatic fetch.
+
+There is no Qwen 3.6 25B-A3B. The measured fast coder is **Qwen3.6-35B-A3B**.
+
+| # | Model | Quant | Size | Fits | Tags | Recipe notes |
+|---|---|---|---:|---|---|---|
+| 1 | Qwen3.5-4B | UD-Q4_K_XL | 2.71 GiB | every Strix Halo | Test, General, Fast. Vision optional, off | Recommended Test Model. `unsloth/Qwen3.5-4B-GGUF`, `Qwen3.5-4B-UD-Q4_K_XL.gguf`, 2912109728 bytes. Not loaded until the user clicks. |
+| 2 | Qwen3.5-9B | UD-Q4_K_XL | 5.56 GiB | every Strix Halo | General | The useful small daily when 27B does not fit. `Qwen3.5-9B-UD-Q4_K_XL.gguf`, 5966095584 bytes. |
+| 3 | Qwen3.6-35B-A3B | UD-Q4_K_XL | 20.8 GiB | 64 GB and up | Coding, Web, Fast | Main file has no MTP tensors. No `--spec-type`. |
+| 4 | Qwen3.8-27B | UD-Q4_K_XL | 16.4 GiB | 64 GB and up | Coding, Web, General. Vision optional, off | MTP is in the GGUF. `--spec-type draft-mtp --spec-draft-n-max 4`. |
+| 5 | Qwen3.8-Flash-Next | UD-IQ4_XS | 87.2 GiB | 128 GB | General, Web, Long context. Vision optional, off | `--ngram-on-disk`. No `--spec-type` and no `-md`. The shared MTP sidecar does not load on this fork. |
+| 6 | DeepSeek-V4-Flash-0731 | UD-Q2_K_XL | 90.2 GiB | 128 GB | General, Long context | The non-Qwen row. No DSpark on this recipe. |
+
+"Fits" uses the ~14 GiB unpinable reserve. A 32 GB machine keeps 4B and 9B. A 64 GB machine adds 27B and 35B-A3B. Flash-Next and V4-Flash need the 128 GB class. A row that does not fit stays listed and disabled.
+
+Speed numbers already measured on this Ryzen AI Max+ 395 / 128 GB box, Vulkan RADV, stay labeled that way: 35B-A3B about 55 tok/s decode, 27B Q4 about 26 tok/s with MTP, V4-Flash about 15–17 tok/s. No number yet for 4B, 9B, or Flash-Next. Those rows ship without a speed until one is measured.
 
 Personal picks from this box (abliterated twins, a sidecar on another port, tailnet addresses) stay out of the public catalog unless SilentD later puts them there on purpose.
 
@@ -80,11 +95,11 @@ The panel after setup:
 - Engine up or down. One button to start or stop the router. After a reboot nothing is listening until this runs.
 - Which model is loaded. Load and unload. One model at a time. Unload is explicit. Choosing another model unloads the current one first, and the panel says that before it does it.
 - Inferring. A loaded slot with `is_processing` is generating. The bar pill shows it. The panel shows it.
-- RAM and GTT. Used, ceiling, available, and leftover if the recommended ceiling is fully pinned. Same arithmetic as setup. A load that does not fit is refused before the server is asked, with those numbers.
+- RAM and GTT. The GTT ceiling is a host setting, so it is always on screen, including before any model is downloaded. The pill shows live used and the ceiling (`12/110G`), idle or not, engine up or down. If the ceiling is still the kernel default, the pill marks it. The panel shows used, ceiling, the recommended ceiling, and leftover if that ceiling is fully pinned. Same arithmetic as setup. A load that does not fit is refused before the server is asked, with those numbers.
 - Tokens since this load, and lifetime tokens for that model. The engine's counters reset when the process dies. OmaStrix keeps the lifetime number itself, in `~/.local/state/omastrix/`, added from the engine while the model is loaded. If a build does not expose a count, the panel says the count is unavailable. It does not invent one.
 - The recipe in force: context, flags, which optional files are on.
 
-The bar pill stays short. Name, a generating mark, GTT. Urgent color when the engine is down or a load failed. The panel is the command center. Middle-click refreshes. Right-click is not a hidden settings dump.
+The bar pill stays short. GTT used/ceiling is always there. A loaded model adds its short name and a generating mark. Urgent color when the engine is down, a load failed, or GTT is still at the kernel default. The panel is the command center. Middle-click refreshes. Right-click is not a hidden settings dump.
 
 ## What it will not do
 
@@ -173,8 +188,8 @@ Issues on GitHub are for bugs and recipe requests. A short `CONTRIBUTING.md` say
 | Cut | Done when |
 |---|---|
 | 0.1 | Repo layout, manifest validates, host probe, themed empty panel, pill, `AGENTS.md`. Old pill still on the bar. |
-| 0.2 | Core setup through one proof completion on this machine, including the GTT offer with a confirm and a reboot he starts. |
-| 0.3 | Catalog, click-to-download with hash check, load/unload with the recipe, unfit reason before the load. |
+| 0.2 | Core setup through a verified engine. GTT offer with a confirm and a reboot he starts. No model download. |
+| 0.3 | Starter library of six, click-to-download with hash check, load/unload with the recipe, unfit reason before the load. GTT used/ceiling on the pill. |
 | 0.4 | Inferring mark, tokens since load, lifetime ledger. |
 | 0.5 | First tagged release. Public only if he says so. |
 | Later | Open an agent on the endpoint without editing its config. Optional front door for other machines. More measured recipes, including smaller Strix Halo SKUs when we have a number from one. |
@@ -184,5 +199,4 @@ Each cut is usable on this box before the next one starts. A cut that needs a re
 ## Still his
 
 - When the repo becomes public.
-- Which small GGUF is the proof model, once we have named a file and checked it loads.
-- Which catalog rows ship in 0.3. Measurements we already have from this 395 / 128 GB box can be labeled and included. They are not a promise for every Strix Halo.
+- Whether DeepSeek-V4-Flash stays as the sixth library row. The other five are the Qwen set.
