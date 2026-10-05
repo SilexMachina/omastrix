@@ -125,8 +125,9 @@ Panel {
         var info = JSON.parse(body)
         if (info.matches_pin)
           updateNote = "Installed build matches the approved pin."
+            + (info.latest_tag ? " Newest published Halo build tag: " + info.latest_tag + ". That tag is not installed until the pin changes." : "")
         else if (info.latest_tag)
-          updateNote = "Approved pin differs. Latest published tag: " + info.latest_tag
+          updateNote = "Installed build is not the approved pin. Newest published Halo build tag: " + info.latest_tag
         else
           updateNote = "Could not read a newer tag."
       } catch (e) {
@@ -392,6 +393,17 @@ Panel {
             enabled: !root.engineBusy
             onClicked: root.runEngine(["engine-check"])
           }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.engine.installed === true
+          wrapMode: Text.Wrap
+          text: "Start runs the service with no model loaded. Open interface needs it running."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          textFormat: Text.PlainText
         }
 
         Text {

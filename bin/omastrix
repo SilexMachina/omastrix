@@ -327,10 +327,13 @@ def engine_action(verb, arg):
             )
             tags = []
             for line in (remote.stdout or "").splitlines():
-                if "refs/tags/" in line and "^{}" not in line:
-                    tags.append(line.split("refs/tags/")[-1])
+                if "refs/tags/" not in line or "^{}" in line:
+                    continue
+                name = line.split("refs/tags/")[-1]
+                if len(name) > 1 and name[0] == "b" and name[1:].isdigit():
+                    tags.append((int(name[1:]), name))
             if tags:
-                latest = tags[-1]
+                latest = max(tags)[1]
         except (OSError, subprocess.TimeoutExpired):
             latest = ""
         info["latest_tag"] = latest

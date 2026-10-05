@@ -44,9 +44,11 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/share/omastrix/bin/llama-server --host 127.0.0.1 --port 8080
-Restart=on-failure
-RestartSec=5
+# No model path: this fork stays in router mode and does not touch the GPU.
+ExecStart=%h/.local/share/omastrix/bin/llama-server --host 127.0.0.1 --port 8080 --models-max 1 --no-models-autoload --offline
+Restart=no
+StandardOutput=append:%h/.local/state/omastrix/llama.log
+StandardError=append:%h/.local/state/omastrix/llama.log
 
 [Install]
 WantedBy=default.target
@@ -55,7 +57,8 @@ EOF
 systemctl --user daemon-reload
 # Leave the service stopped and not enabled. The panel owns start and autostart.
 
-VERSION=$("$BIN/llama-server" --version | head -1)
+VERSION=$("$BIN/llama-server" --version 2>&1 | head -1)
+VERSION=${VERSION#version: }
 python3 - "$VERSION" "$COMMIT" << 'PY'
 import json, sys, time
 from pathlib import Path
