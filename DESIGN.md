@@ -105,7 +105,7 @@ The panel after setup:
 - Engine up or down. One button to start or stop the router. After a reboot nothing is listening until this runs.
 - Which model is loaded. Load and unload. One model at a time. Unload is explicit. Choosing another model unloads the current one first, and the panel says that before it does it.
 - Inferring. A loaded slot with `is_processing` is generating. The bar pill shows it. The panel shows it.
-- RAM and GTT. One line: `GTT  Used: <live> / Max:` and three boxes, 64 GB, 96 GB, 110 GB. The box matching the configured ceiling is highlighted. Changing a box writes the Limine and modprobe files and rebuilds the UKI. It does not reboot. The selected box tooltip says the change will not take place until after reset. The pill still shows live used and the live ceiling.
+- RAM and GTT. One line: `GTT  Used: <live> / Max:` and three boxes, 64 GB, 96 GB, 110 GB. The box matching the configured ceiling is highlighted. Changing a box writes the Limine and modprobe files and rebuilds the UKI. It does not reboot. While the configured ceiling differs from the live session, the text `GTT Change Pending Reboot` stays to the right of the boxes. Setting the boxes back to the live session clears that text. After reboot, the live ceiling matches and the text is gone.
 - Tokens since this load, and lifetime tokens for that model. The engine's counters reset when the process dies. OmaStrix keeps the lifetime number itself, in `~/.local/state/omastrix/`, added from the engine while the model is loaded. If a build does not expose a count, the panel says the count is unavailable. It does not invent one.
 - The recipe in force: context, flags, which optional files are on.
 

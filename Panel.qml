@@ -163,7 +163,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(640))
+    contentWidth: panel.fittedContentWidth(Style.space(980))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(160))
 
     PanelKeyCatcher {
@@ -238,6 +238,17 @@ Panel {
             value: root.gttSet
             enabled: !root.settingGtt
             onChanged: root.chooseGtt(value)
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            visible: root.pending
+            text: "GTT Change Pending Reboot"
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
+            textFormat: Text.PlainText
             anchors.verticalCenter: parent.verticalCenter
           }
         }
