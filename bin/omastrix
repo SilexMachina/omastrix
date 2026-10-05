@@ -7,6 +7,9 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import library
+
 # Stock TTM pages_limit is about 16.3M pages (~62 GiB). A ceiling at or under
 # this is the kernel default, not a Strix Halo raise.
 STOCK_PAGES_LIMIT = 17_000_000
@@ -207,6 +210,12 @@ def snapshot():
     total_g = gib(gtt_total)
     halo = bool(device) and is_strix_halo(pci, name)
     pending = bool(choice) and choice != live_choice
+    lib = library.library_view(total_g)
+    library.write_preset(total_g)
+    pill_text = pill(used_g, total_g, default)
+    if lib.get("loaded_short"):
+        mark = "*" if lib.get("generating") else ""
+        pill_text = "%s%s %s" % (lib["loaded_short"], mark, pill_text)
     return {
         "strix_halo": halo,
         "gpu_name": name,
@@ -221,9 +230,10 @@ def snapshot():
         "gtt_pending": pending,
         "pages_limit": limit,
         "mem_total_gib": gib(mem_total_bytes()),
-        "pill": pill(used_g, total_g, default),
+        "pill": pill_text,
         "vertical": "GTT" if halo else "?",
         "engine": engine_info(),
+        "library": lib,
     }
 
 
@@ -364,6 +374,20 @@ def main():
     if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check"):
         arg = sys.argv[2] if len(sys.argv) > 2 else ""
         return engine_action(verb, arg)
+    if verb == "library-fetch":
+        return library.fetch(sys.argv[2] if len(sys.argv) > 2 else "")
+    if verb == "library-download":
+        print(json.dumps(library.start_download(sys.argv[2] if len(sys.argv) > 2 else "")))
+        return 0
+    if verb == "library-load":
+        model_id = sys.argv[2] if len(sys.argv) > 2 else ""
+        confirm = "--confirm" in sys.argv
+        snap = snapshot()
+        print(json.dumps(library.load_checked(model_id, snap.get("gtt_total_gib"), confirm)))
+        return 0
+    if verb == "library-unload":
+        print(json.dumps(library.unload_model(sys.argv[2] if len(sys.argv) > 2 else "")))
+        return 0
     print("unknown verb: %s" % verb, file=sys.stderr)
     return 2
 

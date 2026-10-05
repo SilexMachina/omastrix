@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "silexmachina.omastrix",
   "name": "OmaStrix",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "SilentD",
   "license": "MIT",
-  "description": "Strix Halo local models for Omarchy. This cut shows GTT and controls the pinned strix-llama.cpp service. It does not download or load a model.",
+  "description": "Strix Halo local models for Omarchy. This cut shows GTT, the pinned engine, and the starter model library. Download does not load.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "Panel.qml" },
   "barWidget": {

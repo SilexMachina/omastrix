@@ -45,7 +45,7 @@ After=default.target
 [Service]
 Type=simple
 # No model path: this fork stays in router mode and does not touch the GPU.
-ExecStart=%h/.local/share/omastrix/bin/llama-server --host 127.0.0.1 --port 8080 --models-max 1 --no-models-autoload --offline
+ExecStart=%h/.local/share/omastrix/bin/llama-server --host 127.0.0.1 --port 8080 --models-max 1 --models-preset %h/.config/omastrix/models.ini --offline
 Restart=no
 StandardOutput=append:%h/.local/state/omastrix/llama.log
 StandardError=append:%h/.local/state/omastrix/llama.log

@@ -14,6 +14,8 @@ Panel {
   property string errorText: ""
   property bool settingGtt: false
   property bool engineBusy: false
+  property string pendingLoad: ""
+  property bool showTooLarge: false
   property string updateNote: ""
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -43,6 +45,8 @@ Panel {
       raw = raw.substring(0, cut) + ")"
     return raw === "" ? "—" : raw
   }
+  readonly property var fitting: (payload.library && payload.library.fitting) ? payload.library.fitting : []
+  readonly property var tooLarge: (payload.library && payload.library.too_large) ? payload.library.too_large : []
   readonly property string usedText: payload.gtt_used_gib === undefined || payload.gtt_used_gib === null
     ? "—" : payload.gtt_used_gib + " GiB"
 
@@ -128,23 +132,52 @@ Panel {
     engineBusy = false
     var body = String(raw || "").trim()
     var msg = String(err || "").trim()
-    if (body.indexOf("latest_tag") >= 0) {
+    if (body.charAt(0) === "{") {
       try {
         var info = JSON.parse(body)
-        if (info.matches_pin)
-          updateNote = "Installed build matches the approved pin."
-            + (info.latest_tag ? " Newest published Halo build tag: " + info.latest_tag + ". That tag is not installed until the pin changes." : "")
-        else if (info.latest_tag)
-          updateNote = "Installed build is not the approved pin. Newest published Halo build tag: " + info.latest_tag
-        else
-          updateNote = "Could not read a newer tag."
+        if (info.needs_confirm) {
+          pendingLoad = info.id || ""
+          errorText = info.error || "Confirm the load."
+          refresh()
+          return
+        }
+        if (info.matches_pin !== undefined) {
+          pendingLoad = ""
+          if (info.matches_pin)
+            updateNote = "Installed build matches the approved pin."
+              + (info.latest_tag ? " Newest published Halo build tag: " + info.latest_tag + ". That tag is not installed until the pin changes." : "")
+          else if (info.latest_tag)
+            updateNote = "Installed build is not the approved pin. Newest published Halo build tag: " + info.latest_tag
+          else
+            updateNote = "Could not read a newer tag."
+          errorText = ""
+          refresh()
+          return
+        }
+        pendingLoad = ""
+        if (info.success === false)
+          errorText = info.error || "That did not work."
+        else {
+          errorText = ""
+          if (info.message)
+            updateNote = info.message
+        }
+        refresh()
+        return
       } catch (e) {
-        updateNote = body
+        errorText = "status parse failed"
       }
-    } else if (body.indexOf("\"success\":false") >= 0 || msg !== "") {
-      errorText = msg !== "" ? msg : body
+    } else if (msg !== "") {
+      errorText = msg
     }
     refresh()
+  }
+
+  function loadModel(id) {
+    if (pendingLoad === id)
+      runEngine(["library-load", id, "--confirm"])
+    else
+      runEngine(["library-load", id])
   }
 
   function openInterface() {
@@ -235,7 +268,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(1180))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(360))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(1100))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -449,11 +482,139 @@ Panel {
           width: parent.width
           visible: root.engine.installed === true
           wrapMode: Text.Wrap
-          text: "Start runs the service with no model loaded. Open interface needs it running."
+          text: "Start runs the service with no model loaded. Load is a separate click. Download does not load."
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           textFormat: Text.PlainText
+        }
+
+        Text {
+          width: parent.width
+          text: "Models"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.bold: true
+          textFormat: Text.PlainText
+        }
+
+        Repeater {
+          model: root.fitting
+          delegate: Column {
+            width: column.width
+            spacing: Style.space(4)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: modelData.name
+                + (modelData.recommended ? "  Recommended" : "")
+                + (modelData.test ? "  Test model" : "")
+                + "  " + modelData.quant
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              textFormat: Text.PlainText
+            }
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Installed: " + (modelData.installed ? "Yes" : "No")
+                + "   Size: " + modelData.size_gib + " GiB"
+                + "   Status: " + (modelData.server_status === "loaded" ? "Loaded" : modelData.server_status === "loading" ? "Loading" : "Not loaded")
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              textFormat: Text.PlainText
+            }
+
+            Text {
+              width: parent.width
+              visible: true
+              wrapMode: Text.Wrap
+              text: modelData.tags.join(", ") + (modelData.speed ? "   " + modelData.speed : "")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              textFormat: Text.PlainText
+            }
+
+            Text {
+              width: parent.width
+              visible: modelData.server_status === "loaded"
+              wrapMode: Text.Wrap
+              text: root.payload.library && root.payload.library.tokens_since_load !== null && root.payload.library.tokens_since_load !== undefined
+                ? "Tokens since load: " + root.payload.library.tokens_since_load
+                : "Token count unavailable"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              textFormat: Text.PlainText
+            }
+
+            Row {
+              spacing: Style.space(8)
+
+              Button {
+                text: modelData.status === "downloading" ? "Downloading" : "Download"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                visible: !modelData.installed
+                enabled: modelData.status !== "downloading" && !root.engineBusy
+                onClicked: root.runEngine(["library-download", modelData.id])
+              }
+              Button {
+                text: "Load"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                visible: modelData.installed && modelData.server_status !== "loaded"
+                enabled: modelData.fits && root.engineState === "running" && !root.engineBusy
+                onClicked: root.loadModel(modelData.id)
+              }
+              Button {
+                text: "Unload"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                visible: modelData.server_status === "loaded"
+                enabled: !root.engineBusy
+                onClicked: root.runEngine(["library-unload", modelData.id])
+              }
+            }
+          }
+        }
+
+        Button {
+          text: root.showTooLarge ? "Hide models too large for this system" : "Show models too large for this system"
+          fontSize: Style.font.title
+          fontFamily: root.fontFamily
+          foreground: root.foreground
+          visible: root.tooLarge.length > 0
+          onClicked: root.showTooLarge = !root.showTooLarge
+        }
+
+        Repeater {
+          model: root.showTooLarge ? root.tooLarge : []
+          delegate: Column {
+            width: column.width
+            spacing: Style.space(4)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: modelData.name + "   Installed: " + (modelData.installed ? "Yes" : "No")
+                + "   Size: " + modelData.size_gib + " GiB   Too large by " + modelData.shortfall_gib + " GiB"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              textFormat: Text.PlainText
+            }
+          }
         }
 
         Text {
