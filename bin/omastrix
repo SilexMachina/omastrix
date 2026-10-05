@@ -223,7 +223,122 @@ def snapshot():
         "mem_total_gib": gib(mem_total_bytes()),
         "pill": pill(used_g, total_g, default),
         "vertical": "GTT" if halo else "?",
+        "engine": engine_info(),
     }
+
+
+def engine_paths():
+    home = os.path.expanduser("~")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return {
+        "bin": os.path.join(home, ".local/share/omastrix/bin/llama-server"),
+        "record": os.path.join(home, ".config/omastrix/engine.json"),
+        "pin": os.path.join(root, "engine-pin.json"),
+        "unit": "omastrix-llama.service",
+        "ui": "http://127.0.0.1:8080",
+    }
+
+
+def systemctl(*args):
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", *args],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+    text = (out.stdout or out.stderr or "").strip()
+    return out.returncode, text
+
+
+def port_open():
+    try:
+        out = subprocess.run(["ss", "-ltn"], capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return any(line.split()[3].endswith(":8080") for line in (out.stdout or "").splitlines() if line.split())
+
+
+def engine_info():
+    paths = engine_paths()
+    record = {}
+    if os.path.exists(paths["record"]):
+        try:
+            with open(paths["record"]) as fh:
+                record = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            record = {}
+    pin = {}
+    if os.path.exists(paths["pin"]):
+        try:
+            with open(paths["pin"]) as fh:
+                pin = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            pin = {}
+    installed = os.path.isfile(paths["bin"]) and os.access(paths["bin"], os.X_OK)
+    active, active_text = systemctl("is-active", paths["unit"])
+    enabled, enabled_text = systemctl("is-enabled", paths["unit"])
+    state = active_text or "inactive"
+    if state == "active":
+        state = "running"
+    elif state == "activating":
+        state = "starting"
+    elif state == "failed":
+        state = "failed"
+    else:
+        state = "stopped"
+    listening = port_open()
+    return {
+        "installed": installed,
+        "version": record.get("version") or "",
+        "commit": record.get("commit") or "",
+        "pin": pin.get("commit") or "",
+        "state": state if installed else "not_installed",
+        "autostart": enabled_text == "enabled",
+        "listening": listening,
+        "ui": paths["ui"],
+    }
+
+
+def engine_action(verb, arg):
+    paths = engine_paths()
+    if verb == "engine-start":
+        code, text = systemctl("start", paths["unit"])
+        print(json.dumps({"success": code == 0, "error": "" if code == 0 else text}))
+        return 0 if code == 0 else 1
+    if verb == "engine-stop":
+        code, text = systemctl("stop", paths["unit"])
+        print(json.dumps({"success": code == 0, "error": "" if code == 0 else text}))
+        return 0 if code == 0 else 1
+    if verb == "engine-autostart":
+        if arg not in ("on", "off"):
+            print("engine-autostart needs on or off", file=sys.stderr)
+            return 2
+        code, text = systemctl("enable" if arg == "on" else "disable", paths["unit"])
+        print(json.dumps({"success": code == 0, "autostart": arg == "on", "error": "" if code == 0 else text}))
+        return 0 if code == 0 else 1
+    if verb == "engine-check":
+        info = engine_info()
+        latest = ""
+        try:
+            remote = subprocess.run(
+                ["git", "ls-remote", "--tags", "https://github.com/halo-box/strix-llama.cpp.git"],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            tags = []
+            for line in (remote.stdout or "").splitlines():
+                if "refs/tags/" in line and "^{}" not in line:
+                    tags.append(line.split("refs/tags/")[-1])
+            if tags:
+                latest = tags[-1]
+        except (OSError, subprocess.TimeoutExpired):
+            latest = ""
+        info["latest_tag"] = latest
+        info["matches_pin"] = bool(info["commit"]) and info["commit"] == info["pin"]
+        print(json.dumps(info))
+        return 0
+    print("unknown verb: %s" % verb, file=sys.stderr)
+    return 2
 
 
 def main():
@@ -243,6 +358,9 @@ def main():
         if os.geteuid() != 0:
             os.execvp("pkexec", ["pkexec", os.path.abspath(__file__), "set-gtt", label])
         return write_gtt(label)
+    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check"):
+        arg = sys.argv[2] if len(sys.argv) > 2 else ""
+        return engine_action(verb, arg)
     print("unknown verb: %s" % verb, file=sys.stderr)
     return 2
 

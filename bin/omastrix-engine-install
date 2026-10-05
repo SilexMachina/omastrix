@@ -1,0 +1,73 @@
+#!/bin/sh
+# Build the pinned Halo fork into the user profile. Does not start the server.
+set -eu
+PIN_FILE="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)/engine-pin.json"
+ROOT="${HOME}/.local/share/omastrix"
+SRC="${ROOT}/src/strix-llama.cpp"
+BIN="${ROOT}/bin"
+COMMIT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$PIN_FILE")
+REPO=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$PIN_FILE")
+
+mkdir -p "$ROOT/src" "$BIN" "${HOME}/.config/omastrix" "${HOME}/.local/state/omastrix"
+
+if [ ! -d "$SRC/.git" ]; then
+  git clone "$REPO" "$SRC"
+fi
+git -C "$SRC" fetch --tags origin
+git -C "$SRC" checkout --detach "$COMMIT"
+
+cmake -B "$SRC/build" -S "$SRC" -G Ninja \
+  -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build "$SRC/build" --config Release -j
+
+for tool in llama-server llama-cli llama-bench; do
+  cat > "$BIN/$tool" << EOF
+#!/bin/sh
+set -eu
+. "\${HOME}/.config/omastrix/llama.env"
+exec "\${HOME}/.local/share/omastrix/src/strix-llama.cpp/build/bin/${tool}" "\$@"
+EOF
+  chmod 755 "$BIN/$tool"
+done
+
+cat > "${HOME}/.config/omastrix/llama.env" << 'EOF'
+# Applied only to the OmaStrix llama process.
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json
+export AMD_VULKAN_ICD=RADV
+EOF
+
+mkdir -p "${HOME}/.config/systemd/user"
+cat > "${HOME}/.config/systemd/user/omastrix-llama.service" << 'EOF'
+[Unit]
+Description=OmaStrix strix-llama.cpp
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/omastrix/bin/llama-server --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+# Leave the service stopped and not enabled. The panel owns start and autostart.
+
+VERSION=$("$BIN/llama-server" --version | head -1)
+python3 - "$VERSION" "$COMMIT" << 'PY'
+import json, sys, time
+from pathlib import Path
+version, commit = sys.argv[1], sys.argv[2]
+path = Path.home() / ".config/omastrix/engine.json"
+path.write_text(json.dumps({
+    "commit": commit,
+    "version": version,
+    "bin": str(Path.home() / ".local/share/omastrix/bin/llama-server"),
+    "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+}, indent=2) + "\n")
+PY
+
+echo "INSTALL_OK"
+"$BIN/llama-cli" --list-devices
