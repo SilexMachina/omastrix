@@ -35,6 +35,14 @@ Panel {
     if (engineState === "stopped") return "Stopped"
     return "Not installed"
   }
+  readonly property string installedText: engine.installed === true ? "Yes" : "No"
+  readonly property string versionText: {
+    var raw = String(engine.version || "")
+    var cut = raw.indexOf(", commit")
+    if (cut >= 0)
+      raw = raw.substring(0, cut) + ")"
+    return raw === "" ? "—" : raw
+  }
   readonly property string usedText: payload.gtt_used_gib === undefined || payload.gtt_used_gib === null
     ? "—" : payload.gtt_used_gib + " GiB"
 
@@ -226,7 +234,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(980))
+    contentWidth: panel.fittedContentWidth(Style.space(1180))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(360))
 
     PanelKeyCatcher {
@@ -322,7 +330,7 @@ Panel {
           spacing: Style.space(10)
 
           Text {
-            text: "Engine"
+            text: "strix-llama.cpp"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
@@ -332,8 +340,8 @@ Panel {
           }
 
           Text {
-            text: root.engineLabel
-            color: root.engineState === "failed" ? root.urgent : root.foreground
+            text: "Installed:"
+            color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
             textFormat: Text.PlainText
@@ -341,10 +349,52 @@ Panel {
           }
 
           Text {
-            text: root.engine.version || root.engine.commit || ""
-            color: root.dim
+            text: root.installedText
+            color: root.engine.installed === true ? root.foreground : root.urgent
             font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.title
+            font.bold: true
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            visible: root.engine.installed === true
+            text: "Version:"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            visible: root.engine.installed === true
+            text: root.versionText
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            visible: root.engine.installed === true
+            text: "Status:"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            visible: root.engine.installed === true
+            text: root.engineLabel
+            color: root.engineState === "failed" ? root.urgent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
             textFormat: Text.PlainText
             anchors.verticalCenter: parent.verticalCenter
           }
