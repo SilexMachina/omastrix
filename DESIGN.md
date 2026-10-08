@@ -51,6 +51,8 @@ Ordered. Each step shows what it found and what it is about to do. A failed step
 
 The library root is `~/models`. The catalog stores paths relative to that folder. The generated preset is `~/.config/omastrix/models.ini` and uses this user's absolute paths. Do not point `--models-dir` at `~/models`.
 
+Open WebUI is a separate user program under `~/.local/share/omastrix/webui`, with settings in `~/.config/omastrix/webui.env` and user service `omastrix-webui`. It listens on `0.0.0.0:3000`. llama stays on `127.0.0.1:8080`. Signup is off. A hand install under `~/.local/share/open-webui` is not this program.
+
 ## Catalog and recipes
 
 The catalog is a file in the repo, versioned with the plugin. Refreshing recommendations means updating the plugin (or an explicit refresh that replaces that file after a check). We curate it. We do not vendor someone else's 40-card registry.

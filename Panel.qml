@@ -439,7 +439,8 @@ Panel {
             Text {
               width: parent.width
               text: "Open WebUI  Installed: " + (root.webui.installed === true ? "Yes" : "No")
-                + "  Status: " + (root.webui.running === true ? "Running" : "Stopped")
+                + (root.webui.version ? "  Version: " + root.webui.version : "")
+                + "  Status: " + (root.webui.state === "installing" ? "Installing" : (root.webui.running === true ? "Running" : "Stopped"))
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -449,28 +450,28 @@ Panel {
             Row {
               spacing: Style.space(8)
               Button {
-                text: "Install Open WebUI"
+                text: root.webui.state === "installing" ? "Installing Open WebUI" : "Install Open WebUI"
                 fontSize: Style.font.title
                 fontFamily: root.fontFamily
                 foreground: root.foreground
-                enabled: root.webui.installed !== true
-                onClicked: root.later("Install Open WebUI")
+                enabled: root.webui.installed !== true && root.webui.state !== "installing" && !root.engineBusy
+                onClicked: root.runEngine(["webui-install"])
               }
               Button {
                 text: "Start Open WebUI"
                 fontSize: Style.font.title
                 fontFamily: root.fontFamily
                 foreground: root.foreground
-                enabled: root.webui.installed === true && root.webui.running !== true
-                onClicked: root.later("Start Open WebUI")
+                enabled: root.webui.installed === true && root.webui.running !== true && !root.engineBusy
+                onClicked: root.runEngine(["webui-start"])
               }
               Button {
                 text: "Stop Open WebUI"
                 fontSize: Style.font.title
                 fontFamily: root.fontFamily
                 foreground: root.foreground
-                enabled: root.webui.running === true
-                onClicked: root.later("Stop Open WebUI")
+                enabled: root.webui.running === true && !root.engineBusy
+                onClicked: root.runEngine(["webui-stop"])
               }
               Button {
                 text: "Open Open WebUI"

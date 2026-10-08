@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import library
+import webui
 
 # Stock TTM pages_limit is about 16.3M pages (~62 GiB). A ceiling at or under
 # this is the kernel default, not a Strix Halo raise.
@@ -239,19 +240,7 @@ def snapshot():
 
 
 def webui_info():
-    bin_path = os.path.expanduser("~/.local/bin/open-webui-serve")
-    installed = os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)
-    listening = False
-    try:
-        out = subprocess.run(["ss", "-ltn"], capture_output=True, text=True, timeout=3, check=False)
-        for line in (out.stdout or "").splitlines():
-            parts = line.split()
-            if len(parts) >= 4 and parts[3].endswith(":3000"):
-                listening = True
-                break
-    except (OSError, subprocess.TimeoutExpired):
-        listening = False
-    return {"installed": installed, "running": listening, "url": "http://127.0.0.1:3000"}
+    return webui.status()
 
 
 def engine_paths():
@@ -404,6 +393,17 @@ def main():
         return 0
     if verb == "library-unload":
         print(json.dumps(library.unload_model(sys.argv[2] if len(sys.argv) > 2 else "")))
+        return 0
+    if verb == "webui-install-run":
+        return webui.install()
+    if verb == "webui-install":
+        print(json.dumps(webui.start_install()))
+        return 0
+    if verb == "webui-start":
+        print(json.dumps(webui.start()))
+        return 0
+    if verb == "webui-stop":
+        print(json.dumps(webui.stop()))
         return 0
     print("unknown verb: %s" % verb, file=sys.stderr)
     return 2
