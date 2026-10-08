@@ -288,12 +288,25 @@ Panel {
         width: parent.width
         spacing: Style.space(12)
 
-        PanelHero {
-          width: parent.width
-          title: "OmaStrix"
-          meta: root.halo ? "Strix Halo" : "Not this host"
-          foreground: root.halo ? root.foreground : root.urgent
-          fontFamily: root.fontFamily
+        Column {
+          spacing: Style.space(2)
+
+          Text {
+            text: "OmaStrix"
+            color: root.halo ? root.foreground : root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.heading
+            font.bold: true
+            textFormat: Text.PlainText
+          }
+
+          Text {
+            text: "Local AI for Strix Halo"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            textFormat: Text.PlainText
+          }
         }
 
         BorderSurface {
