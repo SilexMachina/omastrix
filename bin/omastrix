@@ -233,8 +233,25 @@ def snapshot():
         "pill": pill_text,
         "vertical": "GTT" if halo else "?",
         "engine": engine_info(),
+        "webui": webui_info(),
         "library": lib,
     }
+
+
+def webui_info():
+    bin_path = os.path.expanduser("~/.local/bin/open-webui-serve")
+    installed = os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)
+    listening = False
+    try:
+        out = subprocess.run(["ss", "-ltn"], capture_output=True, text=True, timeout=3, check=False)
+        for line in (out.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[3].endswith(":3000"):
+                listening = True
+                break
+    except (OSError, subprocess.TimeoutExpired):
+        listening = False
+    return {"installed": installed, "running": listening, "url": "http://127.0.0.1:3000"}
 
 
 def engine_paths():

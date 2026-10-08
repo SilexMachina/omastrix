@@ -183,6 +183,36 @@ def token_count(name):
     return None
 
 
+def service_ram_gb():
+    uid = os.getuid()
+    path = "/sys/fs/cgroup/user.slice/user-%s.slice/user@%s.service/app.slice/omastrix-llama.service/memory.current" % (uid, uid)
+    try:
+        raw = int(open(path).read().strip())
+    except (OSError, ValueError):
+        return None
+    return round(raw / 1024**3, 1)
+
+
+def status_label(installed, server_status, generating):
+    if not installed:
+        return "Not Installed"
+    if server_status == "loaded" and generating:
+        return "Inferring"
+    if server_status == "loaded":
+        return "Loaded"
+    return "Not Loaded"
+
+
+PARAMS = {
+    "qwen35-4b": "4B",
+    "qwen35-9b": "9B",
+    "qwen36-35b-a3b": "35B",
+    "qwen38-27b": "27B",
+    "qwen38-flash-next": "56B",
+    "deepseek-v4-flash": "8.4B",
+}
+
+
 def read_ledger():
     try:
         with open(ledger_path()) as fh:
@@ -244,12 +274,25 @@ def library_view(gtt_total_gib):
     if loaded:
         generating = slot_state(loaded["name"])
         tokens = token_count(loaded["name"])
+    ram = service_ram_gb() if loaded else None
+    for row in rows:
+        row["params"] = PARAMS.get(row["id"], row["short"])
+        row["engine_name"] = "strix-llama.cpp"
+        row["status_label"] = status_label(row["installed"], row["server_status"], generating and row is loaded)
+        row["ram"] = ("%s GB" % ram) if row["server_status"] == "loaded" and ram is not None else "—"
+        row["size"] = "%s GB" % row["size_gib"]
+        if not row["fits"]:
+            row["notes"] = "Too large for this system by %s GB" % row["shortfall_gib"]
+        else:
+            row["notes"] = "—"
+    ordered = fitting + too_large
     return {
         "root": models_root(),
         "reserve_gib": reserve,
         "recommended": rec,
         "fitting": fitting,
         "too_large": too_large,
+        "rows": ordered,
         "loaded_id": loaded["id"] if loaded else "",
         "loaded_name": loaded["name"] if loaded else "",
         "loaded_short": loaded["short"] if loaded else "",

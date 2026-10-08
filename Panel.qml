@@ -15,12 +15,13 @@ Panel {
   property bool settingGtt: false
   property bool engineBusy: false
   property string pendingLoad: ""
-  property bool showTooLarge: false
   property string updateNote: ""
+  property string addLink: ""
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property color paneBorder: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool halo: payload.strix_halo === true
   readonly property bool gttDefault: payload.gtt_default === true
@@ -29,6 +30,7 @@ Panel {
   readonly property string resetTip: "This change will not take place until after reset."
   readonly property string pillText: payload.pill || "GTT ?"
   readonly property var engine: payload.engine || ({})
+  readonly property var webui: payload.webui || ({})
   readonly property string engineState: engine.state || "not_installed"
   readonly property string engineLabel: {
     if (engineState === "running") return "Running"
@@ -45,10 +47,16 @@ Panel {
       raw = raw.substring(0, cut) + ")"
     return raw === "" ? "—" : raw
   }
-  readonly property var fitting: (payload.library && payload.library.fitting) ? payload.library.fitting : []
-  readonly property var tooLarge: (payload.library && payload.library.too_large) ? payload.library.too_large : []
   readonly property string usedText: payload.gtt_used_gib === undefined || payload.gtt_used_gib === null
     ? "—" : payload.gtt_used_gib + " GiB"
+  readonly property var models: (payload.library && payload.library.rows) ? payload.library.rows : []
+  readonly property int colModel: Style.space(230)
+  readonly property int colStatus: Style.space(140)
+  readonly property int colParams: Style.space(110)
+  readonly property int colSize: Style.space(90)
+  readonly property int colRam: Style.space(100)
+  readonly property int colEngine: Style.space(170)
+  readonly property int colNotes: Style.space(320)
 
   readonly property var gttOptions: [
     { value: "64", label: "64 GB", tooltip: root.tipFor("64") },
@@ -103,7 +111,7 @@ Panel {
     settingGtt = false
     var msg = String(err || "").trim()
     var body = String(raw || "").trim()
-    if (body.indexOf("\"success\":true") >= 0 || body.indexOf("\"success\": true") >= 0) {
+    if (body.indexOf("\"success\",true") >= 0 || body.indexOf("\"success\": true") >= 0) {
       errorText = ""
       refresh()
       if (bar)
@@ -189,8 +197,12 @@ Panel {
       bar.run("xdg-open http://127.0.0.1:8080")
   }
 
-  function toggleAutostart() {
-    runEngine(["engine-autostart", engine.autostart ? "off" : "on"])
+  function later(what) {
+    updateNote = what + " is not wired yet."
+  }
+
+  function addModel() {
+    later("Adding a model from a link")
   }
 
   implicitWidth: button.implicitWidth
@@ -231,14 +243,8 @@ Panel {
 
   Process {
     id: setProc
-    stdout: StdioCollector {
-      id: setOut
-      waitForEnd: true
-    }
-    stderr: StdioCollector {
-      id: setErr
-      waitForEnd: true
-    }
+    stdout: StdioCollector { id: setOut; waitForEnd: true }
+    stderr: StdioCollector { id: setErr; waitForEnd: true }
     onRunningChanged: if (!running) root.finishSet(setOut.text, setErr.text)
   }
 
@@ -267,8 +273,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(1180))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(1100))
+    contentWidth: panel.fittedContentWidth(Style.space(1560))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(1280))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -290,228 +296,25 @@ Panel {
           fontFamily: root.fontFamily
         }
 
-        Row {
-          id: gttRow
+        BorderSurface {
+          id: systemPane
           width: parent.width
-          spacing: Style.space(10)
+          color: "transparent"
+          radius: Style.space(4)
+          padding: Style.space(12)
+          borderSpec: Border.flat(root.paneBorder, 1)
+          implicitHeight: systemColumn.implicitHeight + contentTopInset + contentBottomInset
+          height: implicitHeight
 
-          Text {
-            text: "GTT"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            text: "Used: " + root.usedText
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            text: "/"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            text: "Max:"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          ButtonGroup {
-            id: maxBoxes
-            fontSize: Style.font.title
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            accent: Color.accent
-            options: root.gttOptions
-            value: root.gttSet
-            enabled: !root.settingGtt
-            onChanged: root.chooseGtt(value)
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            visible: root.pending
-            text: "GTT Change Pending Reboot"
-            color: root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-        }
-
-        Row {
-          id: engineRow
-          width: parent.width
-          spacing: Style.space(10)
-
-          Text {
-            text: "strix-llama.cpp"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            text: "Installed:"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            text: root.installedText
-            color: root.engine.installed === true ? root.foreground : root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            visible: root.engine.installed === true
-            text: "Version:"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            visible: root.engine.installed === true
-            text: root.versionText
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            visible: root.engine.installed === true
-            text: "Status:"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            visible: root.engine.installed === true
-            text: root.engineLabel
-            color: root.engineState === "failed" ? root.urgent : root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            textFormat: Text.PlainText
-            anchors.verticalCenter: parent.verticalCenter
-          }
-        }
-
-        Row {
-          spacing: Style.space(8)
-
-          Button {
-            text: "Start"
-            fontSize: Style.font.title
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            enabled: root.engineState === "stopped" && !root.engineBusy
-            onClicked: root.runEngine(["engine-start"])
-          }
-          Button {
-            text: "Stop"
-            fontSize: Style.font.title
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            enabled: root.engineState === "running" && !root.engineBusy
-            onClicked: root.runEngine(["engine-stop"])
-          }
-          Button {
-            text: "Open interface"
-            fontSize: Style.font.title
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            enabled: root.engineState === "running"
-            onClicked: root.openInterface()
-          }
-          Button {
-            text: root.engine.autostart ? "Logon start: On" : "Logon start: Off"
-            fontSize: Style.font.title
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            enabled: root.engine.installed === true && !root.engineBusy
-            onClicked: root.toggleAutostart()
-          }
-          Button {
-            text: "Check updates"
-            fontSize: Style.font.title
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            enabled: !root.engineBusy
-            onClicked: root.runEngine(["engine-check"])
-          }
-        }
-
-        Text {
-          width: parent.width
-          visible: root.engine.installed === true
-          wrapMode: Text.Wrap
-          text: "Start runs the service with no model loaded. Load is a separate click. Download does not load."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          textFormat: Text.PlainText
-        }
-
-        Text {
-          width: parent.width
-          text: "Models"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.title
-          font.bold: true
-          textFormat: Text.PlainText
-        }
-
-        Repeater {
-          model: root.fitting
-          delegate: Column {
-            width: column.width
-            spacing: Style.space(4)
+          Column {
+            id: systemColumn
+            x: systemPane.contentLeftInset
+            y: systemPane.contentTopInset
+            width: systemPane.width - systemPane.contentLeftInset - systemPane.contentRightInset
+            spacing: Style.space(8)
 
             Text {
-              width: parent.width
-              wrapMode: Text.Wrap
-              text: modelData.name
-                + (modelData.recommended ? "  Recommended" : "")
-                + (modelData.test ? "  Test model" : "")
-                + "  " + modelData.quant
+              text: "System"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -522,97 +325,287 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.Wrap
-              text: "Installed: " + (modelData.installed ? "Yes" : "No")
-                + "   Size: " + modelData.size_gib + " GiB"
-                + "   Status: " + (modelData.server_status === "loaded" ? "Loaded" : modelData.server_status === "loading" ? "Loading" : "Not loaded")
+              text: "strix-llama.cpp  Installed: " + root.installedText
+                + "  Version: " + root.versionText
+                + "  Status: " + root.engineLabel
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               textFormat: Text.PlainText
             }
 
-            Text {
+            Row {
+              id: gttRow
               width: parent.width
-              visible: true
-              wrapMode: Text.Wrap
-              text: modelData.tags.join(", ") + (modelData.speed ? "   " + modelData.speed : "")
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              textFormat: Text.PlainText
+              spacing: Style.space(10)
+
+              Text {
+                text: "GTT"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+                textFormat: Text.PlainText
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              Text {
+                text: "Used: " + root.usedText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                textFormat: Text.PlainText
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              Text {
+                text: "Max:"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                textFormat: Text.PlainText
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              ButtonGroup {
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                accent: Color.accent
+                options: root.gttOptions
+                value: root.gttSet
+                enabled: !root.settingGtt
+                onChanged: root.chooseGtt(value)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              Text {
+                visible: root.pending
+                text: "GTT Change Pending Reboot"
+                color: root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+                textFormat: Text.PlainText
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            Row {
+              spacing: Style.space(8)
+              Button {
+                text: root.engine.installed === true ? "strrix-llama.cpp installed" : "Install strix-llama.cpp"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.engine.installed !== true && !root.engineBusy
+                onClicked: root.later("Install strix-llama.cpp")
+              }
+              Button {
+                text: "Start"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.engineState === "stopped" && !root.engineBusy
+                onClicked: root.runEngine(["engine-start"])
+              }
+              Button {
+                text: "Stop"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.engineState === "running" && !root.engineBusy
+                onClicked: root.runEngine(["engine-stop"])
+              }
+              Button {
+                text: "Open engine UI"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.engineState === "running"
+                onClicked: root.openInterface()
+              }
             }
 
             Text {
               width: parent.width
-              visible: modelData.server_status === "loaded"
-              wrapMode: Text.Wrap
-              text: root.payload.library && root.payload.library.tokens_since_load !== null && root.payload.library.tokens_since_load !== undefined
-                ? "Tokens since load: " + root.payload.library.tokens_since_load
-                : "Token count unavailable"
-              color: root.dim
+              text: "Open WebUI  Installed: " + (root.webui.installed === true ? "Yes" : "No")
+                + "  Status: " + (root.webui.running === true ? "Running" : "Stopped")
+              color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+              font.pixelSize: Style.font.title
               textFormat: Text.PlainText
             }
 
             Row {
               spacing: Style.space(8)
-
               Button {
-                text: modelData.status === "downloading" ? "Downloading" : "Download"
+                text: "Install Open WebUI"
                 fontSize: Style.font.title
                 fontFamily: root.fontFamily
                 foreground: root.foreground
-                visible: !modelData.installed
-                enabled: modelData.status !== "downloading" && !root.engineBusy
-                onClicked: root.runEngine(["library-download", modelData.id])
+                enabled: root.webui.installed !== true
+                onClicked: root.later("Install Open WebUI")
               }
               Button {
-                text: "Load"
+                text: "Start Open WebUI"
                 fontSize: Style.font.title
                 fontFamily: root.fontFamily
                 foreground: root.foreground
-                visible: modelData.installed && modelData.server_status !== "loaded"
-                enabled: modelData.fits && root.engineState === "running" && !root.engineBusy
-                onClicked: root.loadModel(modelData.id)
+                enabled: root.webui.installed === true && root.webui.running !== true
+                onClicked: root.later("Start Open WebUI")
               }
               Button {
-                text: "Unload"
+                text: "Stop Open WebUI"
                 fontSize: Style.font.title
                 fontFamily: root.fontFamily
                 foreground: root.foreground
-                visible: modelData.server_status === "loaded"
-                enabled: !root.engineBusy
-                onClicked: root.runEngine(["library-unload", modelData.id])
+                enabled: root.webui.running === true
+                onClicked: root.later("Stop Open WebUI")
+              }
+              Button {
+                text: "Open Open WebUI"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.webui.running === true
+                onClicked: {
+                  if (bar)
+                    bar.run("xdg-open http://127.0.0.1:3000")
+                }
               }
             }
           }
         }
 
-        Button {
-          text: root.showTooLarge ? "Hide models too large for this system" : "Show models too large for this system"
-          fontSize: Style.font.title
-          fontFamily: root.fontFamily
-          foreground: root.foreground
-          visible: root.tooLarge.length > 0
-          onClicked: root.showTooLarge = !root.showTooLarge
-        }
+        BorderSurface {
+          id: modelPane
+          width: parent.width
+          color: "transparent"
+          radius: Style.space(4)
+          padding: Style.space(12)
+          borderSpec: Border.flat(root.paneBorder, 1)
+          implicitHeight: modelColumn.implicitHeight + contentTopInset + contentBottomInset
+          height: implicitHeight
 
-        Repeater {
-          model: root.showTooLarge ? root.tooLarge : []
-          delegate: Column {
-            width: column.width
-            spacing: Style.space(4)
+          Column {
+            id: modelColumn
+            x: modelPane.contentLeftInset
+            y: modelPane.contentTopInset
+            width: modelPane.width - modelPane.contentLeftInset - modelPane.contentRightInset
+            spacing: Style.space(8)
 
             Text {
-              width: parent.width
-              wrapMode: Text.Wrap
-              text: modelData.name + "   Installed: " + (modelData.installed ? "Yes" : "No")
-                + "   Size: " + modelData.size_gib + " GiB   Too large by " + modelData.shortfall_gib + " GiB"
-              color: root.dim
+              text: "Models"
+              color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
+              font.bold: true
               textFormat: Text.PlainText
+            }
+
+            Row {
+              spacing: Style.space(8)
+              TextField {
+                width: Style.space(640)
+                placeholderText: "Paste a model link"
+                text: root.addLink
+                foreground: root.foreground
+                font.pixelSize: Style.font.title
+                font.family: root.fontFamily
+                onTextChanged: root.addLink = text
+                onAccepted: root.addModel()
+              }
+              Button {
+                text: "Add model"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                onClicked: root.addModel()
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              Text { width: root.colModel; text: "Model"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+              Text { width: root.colStatus; text: "Status"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+              Text { width: root.colParams; text: "Parameters"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+              Text { width: root.colSize; text: "Size"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+              Text { width: root.colRam; text: "RAM"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+              Text { width: root.colEngine; text: "Engine"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+              Text { width: root.colNotes; text: "Notes"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+            }
+
+            Rectangle {
+              width: parent.width
+              height: 1
+              color: root.paneBorder
+            }
+
+            Repeater {
+              model: root.models
+              delegate: Row {
+                width: modelColumn.width
+                spacing: Style.space(8)
+                Text {
+                  width: root.colModel
+                  text: modelData.name
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  elide: Text.ElideRight
+                  textFormat: Text.PlainText
+                }
+                Text {
+                  width: root.colStatus
+                  text: modelData.status_label || "—"
+                  color: modelData.status_label === "Inferring" ? Color.accent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: modelData.status_label === "Loaded" || modelData.status_label === "Inferring"
+                  elide: Text.ElideRight
+                  textFormat: Text.PlainText
+                }
+                Text {
+                  width: root.colParams
+                  text: modelData.params || "—"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  textFormat: Text.PlainText
+                }
+                Text {
+                  width: root.colSize
+                  text: modelData.size || "—"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  textFormat: Text.PlainText
+                }
+                Text {
+                  width: root.colRam
+                  text: modelData.ram || "—"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  textFormat: Text.PlainText
+                }
+                Text {
+                  width: root.colEngine
+                  text: modelData.engine_name || "—"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  elide: Text.ElideRight
+                  textFormat: Text.PlainText
+                }
+                Text {
+                  width: root.colNotes
+                  text: modelData.notes || "—"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                  textFormat: Text.PlainText
+                }
+              }
             }
           }
         }
