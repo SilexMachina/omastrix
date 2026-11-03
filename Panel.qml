@@ -93,8 +93,10 @@ Panel {
 
   function apply(raw) {
     try {
-      payload = JSON.parse(String(raw || "").trim())
-      errorText = ""
+      var next = JSON.parse(String(raw || "").trim())
+      payload = next
+      if (errorText.indexOf("Stop strix-llama.cpp before updating") === 0 && next.engine && next.engine.state !== "running")
+        errorText = ""
     } catch (e) {
       errorText = "status parse failed"
     }
@@ -467,6 +469,17 @@ Panel {
                 enabled: root.engine.updating !== true && !root.engineBusy
                 onClicked: root.runEngine(["engine-update"])
               }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.engine.update_available === true && root.engineState === "running"
+              wrapMode: Text.Wrap
+              text: "Stop strix-llama.cpp before updating. The program that is running would be replaced."
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              textFormat: Text.PlainText
             }
 
             Text {
