@@ -56,7 +56,8 @@ Panel {
   readonly property int colSize: Style.space(90)
   readonly property int colRam: Style.space(100)
   readonly property int colEngine: Style.space(170)
-  readonly property int colNotes: Style.space(320)
+  readonly property int colNotes: Style.space(240)
+  readonly property int colAction: Style.space(120)
 
   readonly property var gttOptions: [
     { value: "64", label: "64 GB", tooltip: root.tipFor("64") },
@@ -273,7 +274,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(1560))
+    contentWidth: panel.fittedContentWidth(Style.space(1680))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(1280))
 
     PanelKeyCatcher {
@@ -545,6 +546,7 @@ Panel {
               Text { width: root.colRam; text: "RAM"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
               Text { width: root.colEngine; text: "Engine"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
               Text { width: root.colNotes; text: "Notes"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
+              Text { width: root.colAction; text: "Action"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true; textFormat: Text.PlainText }
             }
 
             Rectangle {
@@ -618,6 +620,41 @@ Panel {
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
                   textFormat: Text.PlainText
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+                Button {
+                  property string rowId: modelData.id
+                  property bool rowInstalled: modelData.installed === true
+                  property string rowStatus: modelData.status || ""
+                  property string rowLabel: modelData.status_label || ""
+                  property bool rowFits: modelData.fits === true
+                  text: {
+                    if (!rowInstalled)
+                      return rowStatus === "downloading" ? "Installing" : "Install"
+                    if (rowLabel === "Loaded" || rowLabel === "Inferring")
+                      return "Unload"
+                    return "Load"
+                  }
+                  fontSize: Style.font.title
+                  fontFamily: root.fontFamily
+                  foreground: root.foreground
+                  enabled: {
+                    if (root.engineBusy)
+                      return false
+                    if (!rowInstalled)
+                      return rowStatus !== "downloading"
+                    if (rowLabel === "Loaded" || rowLabel === "Inferring")
+                      return true
+                    return rowFits
+                  }
+                  onClicked: {
+                    if (!rowInstalled)
+                      root.runEngine(["library-download", rowId])
+                    else if (rowLabel === "Loaded" || rowLabel === "Inferring")
+                      root.runEngine(["library-unload", rowId])
+                    else
+                      root.loadModel(rowId)
+                  }
                 }
               }
             }

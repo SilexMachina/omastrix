@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -434,6 +435,27 @@ def loaded_name():
     return None
 
 
+def ensure_engine():
+    state = subprocess.run(
+        ["systemctl", "--user", "is-active", "omastrix-llama.service"],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    if (state.stdout or "").strip() != "active":
+        started = subprocess.run(
+            ["systemctl", "--user", "start", "omastrix-llama.service"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        if started.returncode != 0:
+            err = (started.stderr or started.stdout or "").strip()
+            return False, err or "strix-llama.cpp did not start."
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        if server_list() is not None:
+            return True, ""
+        time.sleep(0.4)
+    return False, "strix-llama.cpp did not open port 8080."
+
+
 def unload_name(name):
     return http_json("/models/unload", {"model": name}, timeout=30)
 
@@ -458,7 +480,10 @@ def load_checked(model_id, gtt_total_gib, confirm):
         }
     server = server_list()
     if server is None:
-        return {"success": False, "id": model_id, "error": "Start strix-llama.cpp before loading a model."}
+        ok, err = ensure_engine()
+        if not ok:
+            return {"success": False, "id": model_id, "error": err}
+        server = server_list() or {}
     current = next((name for name, status in server.items() if status == "loaded"), "")
     if current and current != row["name"] and not confirm:
         return {
