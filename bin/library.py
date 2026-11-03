@@ -312,7 +312,12 @@ def library_view(gtt_total_gib):
         row["status_label"] = status_label(row["installed"], row["server_status"], generating and row is loaded)
         row["ram"] = ("%s GB" % ram) if row["server_status"] == "loaded" and ram is not None else "—"
         row["size"] = "%s GB" % row["size_gib"]
-        if not row["fits"]:
+        need = row["need_bytes"] or 0
+        have = row["have_bytes"] or 0
+        row["progress"] = 0 if not need else min(100, int(round(100 * have / need)))
+        if row["status"] == "downloading":
+            row["notes"] = "%s%%  %s GB of %s GB" % (row["progress"], size_label(have), size_label(need))
+        elif not row["fits"]:
             row["notes"] = "Too large for this system by %s GB" % row["shortfall_gib"]
         elif row.get("added"):
             row["notes"] = "Added from a link. Context memory is estimated."

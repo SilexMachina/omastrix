@@ -676,15 +676,29 @@ Panel {
                   elide: Text.ElideRight
                   textFormat: Text.PlainText
                 }
-                Text {
+                Column {
                   width: root.colNotes
-                  text: modelData.notes || "—"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  elide: Text.ElideRight
-                  textFormat: Text.PlainText
-                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(4)
+                  Rectangle {
+                    visible: modelData.status === "downloading"
+                    width: parent.width
+                    height: Style.space(8)
+                    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.28)
+                    Rectangle {
+                      width: parent.width * Math.max(0, Math.min(1, (modelData.progress || 0) / 100))
+                      height: parent.height
+                      color: Color.accent
+                    }
+                  }
+                  Text {
+                    width: parent.width
+                    text: modelData.notes || "—"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                    textFormat: Text.PlainText
+                  }
                 }
                 Row {
                   spacing: Style.space(6)
@@ -696,7 +710,7 @@ Panel {
                     property bool rowFits: modelData.fits === true
                     text: {
                       if (!rowInstalled)
-                        return rowStatus === "downloading" ? "Installing" : "Install"
+                        return rowStatus === "downloading" ? ("Installing " + (modelData.progress || 0) + "%") : "Install"
                       if (rowLabel === "Loaded" || rowLabel === "Inferring")
                         return "Unload"
                       return "Load"
