@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -47,8 +48,34 @@ def load_catalog():
     return data["models"], float(data.get("reserve_gib", RESERVE_GIB))
 
 
-def find_model(model_id):
+def added_path():
+    return os.path.join(os.path.expanduser("~"), ".config/omastrix/added.json")
+
+
+def load_added():
+    try:
+        with open(added_path()) as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return []
+    models = data.get("models") if isinstance(data, dict) else None
+    return models if isinstance(models, list) else []
+
+
+def save_added(models):
+    os.makedirs(os.path.dirname(added_path()), exist_ok=True)
+    with open(added_path(), "w") as fh:
+        json.dump({"models": models}, fh, indent=2)
+        fh.write("\n")
+
+
+def all_models():
     models, reserve = load_catalog()
+    return models + load_added(), reserve
+
+
+def find_model(model_id):
+    models, reserve = all_models()
     for row in models:
         if row["id"] == model_id:
             return row, reserve
@@ -224,7 +251,7 @@ def read_ledger():
 
 
 def library_view(gtt_total_gib):
-    models, reserve = load_catalog()
+    models, reserve = all_models()
     server = server_list()
     rows = []
     for row in models:
@@ -264,6 +291,7 @@ def library_view(gtt_total_gib):
             "server_status": server_status,
             "speed": ("%s tok/s %s, %s" % (speed["tok_s"], speed["kind"], speed["machine"])) if speed else "",
             "error": state.get("error") or "",
+            "added": bool(row.get("added")),
         })
     rec = recommend_id(rows)
     for row in rows:
@@ -286,6 +314,8 @@ def library_view(gtt_total_gib):
         row["size"] = "%s GB" % row["size_gib"]
         if not row["fits"]:
             row["notes"] = "Too large for this system by %s GB" % row["shortfall_gib"]
+        elif row.get("added"):
+            row["notes"] = "Added from a link. Context memory is estimated."
         else:
             row["notes"] = "—"
     ordered = fitting + too_large
@@ -306,7 +336,7 @@ def library_view(gtt_total_gib):
 
 
 def preset_text(gtt_total_gib=None):
-    rows, reserve = load_catalog()
+    rows, reserve = all_models()
     lines = [
         "version = 1",
         "",
@@ -367,6 +397,119 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def params_from_name(name):
+    match = re.search(r"(\d+(?:\.\d+)?)B", name, re.I)
+    if not match:
+        return "—"
+    return match.group(1) + "B"
+
+
+def normalize_gguf_url(raw):
+    text = (raw or "").strip()
+    if not text:
+        return "", "Paste a direct link to one .gguf file."
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return "", "The link has to be an https link to one .gguf file."
+    path = parsed.path
+    host = parsed.netloc.lower()
+    if host.endswith("huggingface.co") and "/blob/" in path:
+        path = path.replace("/blob/", "/resolve/", 1)
+    filename = os.path.basename(path)
+    if not filename.lower().endswith(".gguf"):
+        return "", "That is not a direct link to a .gguf file. A model page is not enough."
+    if re.search(r"\d+-of-\d+", filename):
+        return "", "That file is one piece of a split model. Paste one complete .gguf file."
+    safe = re.sub(r"[^A-Za-z0-9._+-]", "_", filename)
+    if not safe.lower().endswith(".gguf") or safe == ".gguf":
+        return "", "That file name cannot be saved."
+    url = urllib.parse.urlunsplit(("https", parsed.netloc, path, "", ""))
+    return url, ""
+
+
+def remote_size(url):
+    try:
+        out = subprocess.run(
+            ["curl", "-fsI", "-L", "--max-redirs", "5", "--retry", "2", "--max-time", "30", url],
+            capture_output=True, text=True, timeout=40, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    if out.returncode != 0:
+        return 0
+    size = 0
+    for line in (out.stdout or "").splitlines():
+        if line.lower().startswith("content-length:"):
+            try:
+                size = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                size = 0
+    return size
+
+
+def remember_added_file(model_id, rel, nbytes, digest):
+    models = load_added()
+    changed = False
+    for row in models:
+        if row.get("id") != model_id:
+            continue
+        for item in row.get("files") or []:
+            if item.get("path") == rel:
+                item["bytes"] = nbytes
+                item["sha256"] = digest
+                changed = True
+    if changed:
+        save_added(models)
+
+
+def add_from_url(raw):
+    url, err = normalize_gguf_url(raw)
+    if err:
+        return {"success": False, "error": err}
+    catalog, _reserve = load_catalog()
+    for row in catalog:
+        for item in row.get("files") or []:
+            if item.get("url") == url:
+                return {"success": False, "error": row["name"] + " is already in the list."}
+    added = load_added()
+    for row in added:
+        for item in row.get("files") or []:
+            if item.get("url") == url:
+                return {"success": True, "id": row["id"], "message": row["name"] + " is already in the list. It is not loaded."}
+    size = remote_size(url)
+    if size <= 0:
+        return {"success": False, "error": "The link did not report a file size. Use a direct https link to one .gguf file."}
+    filename = re.sub(r"[^A-Za-z0-9._+-]", "_", os.path.basename(urllib.parse.urlsplit(url).path))[:180]
+    stem = filename[:-5]
+    model_id = "link-" + hashlib.sha256(url.encode()).hexdigest()[:12]
+    row = {
+        "id": model_id,
+        "name": stem[:80],
+        "short": params_from_name(stem),
+        "quant": "",
+        "tags": ["Added"],
+        "test": False,
+        "ctx": 8192,
+        "kv_gib": 1,
+        "files": [{
+            "path": "added/%s/%s" % (model_id, filename),
+            "bytes": size,
+            "sha256": "",
+            "url": url,
+            "primary": True,
+        }],
+        "serve": {},
+        "added": True,
+    }
+    added.append(row)
+    save_added(added)
+    return {
+        "success": True,
+        "id": model_id,
+        "message": row["name"] + " was added. It is not downloaded and it is not loaded.",
+    }
+
+
 def fetch(model_id):
     row, _reserve = find_model(model_id)
     if row is None:
@@ -394,13 +537,16 @@ def fetch(model_id):
             print(json.dumps({"success": False, "error": "Download incomplete"}))
             return 1
         digest = sha256_file(dest)
-        if digest != item["sha256"]:
+        expected = item.get("sha256") or ""
+        if expected and digest != expected:
             write_download_state(model_id, {
                 "pid": 0,
                 "error": "Downloaded file hash does not match the catalog",
             })
             print(json.dumps({"success": False, "error": "Hash mismatch"}))
             return 1
+        if not expected:
+            remember_added_file(model_id, item["path"], file_bytes(dest), digest)
     write_download_state(model_id, {"pid": 0, "error": ""})
     print(json.dumps({"success": True, "message": row["name"] + " is installed. It is not loaded."}))
     return 0

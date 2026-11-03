@@ -506,6 +506,9 @@ def main():
         return engine_action(verb, arg)
     if verb == "library-fetch":
         return library.fetch(sys.argv[2] if len(sys.argv) > 2 else "")
+    if verb == "library-add":
+        print(json.dumps(library.add_from_url(sys.argv[2] if len(sys.argv) > 2 else "")))
+        return 0
     if verb == "library-download":
         print(json.dumps(library.start_download(sys.argv[2] if len(sys.argv) > 2 else "")))
         return 0

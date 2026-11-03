@@ -177,8 +177,11 @@ Panel {
           errorText = info.error || "That did not work."
         else {
           errorText = ""
-          if (info.message)
+          if (info.message) {
             updateNote = info.message
+            if (info.message.indexOf("was added") >= 0)
+              addLink = ""
+          }
         }
         refresh()
         return
@@ -219,7 +222,12 @@ Panel {
   }
 
   function addModel() {
-    later("Adding a model from a link")
+    var link = addLink.trim()
+    if (link === "") {
+      errorText = "Paste a direct link to one .gguf file."
+      return
+    }
+    runEngine(["library-add", link])
   }
 
   implicitWidth: button.implicitWidth
@@ -575,7 +583,7 @@ Panel {
               spacing: Style.space(8)
               TextField {
                 width: Style.space(640)
-                placeholderText: "Paste a model link"
+                placeholderText: "Direct link to one .gguf file"
                 text: root.addLink
                 foreground: root.foreground
                 font.pixelSize: Style.font.title
