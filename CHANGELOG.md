@@ -10,5 +10,6 @@
 - The panel title is OmaStrix. The line under it is Local AI for Strix Halo.
 - Open WebUI is installed and controlled as its own user service. The hand install under `~/.local/share/open-webui` is not that service.
 - The model table has an Action column: Install, Load, Unload, and Delete.
+- Check for updates names the newest published strix-llama.cpp build. Update installs that build when the program is stopped.
 - Setup does not download a model. Starter library is six click-to-install rows. The pill always shows GTT used and ceiling.
 - The library shows only models that fit this machine. Too-large rows are behind a control, with the shortfall noted.

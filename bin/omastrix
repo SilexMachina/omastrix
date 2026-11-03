@@ -4,6 +4,7 @@
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -252,7 +253,58 @@ def engine_paths():
         "pin": os.path.join(root, "engine-pin.json"),
         "unit": "omastrix-llama.service",
         "ui": "http://127.0.0.1:8080",
+        "installer": os.path.join(root, "bin/omastrix-engine-install"),
+        "check": os.path.join(home, ".local/state/omastrix/engine-check.json"),
+        "update": os.path.join(home, ".local/state/omastrix/engine-update.json"),
+        "update_log": os.path.join(home, ".local/state/omastrix/engine-update.log"),
     }
+
+
+def read_json(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def build_number(version):
+    match = re.search(r"build (\d+)", version or "")
+    return int(match.group(1)) if match else 0
+
+
+def pid_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def newest_halo_tag():
+    try:
+        remote = subprocess.run(
+            ["git", "ls-remote", "--tags", "https://github.com/halo-box/strix-llama.cpp.git"],
+            capture_output=True, text=True, timeout=25, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    best = None
+    for line in (remote.stdout or "").splitlines():
+        if "refs/tags/" not in line or line.endswith("^{}"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        sha, ref = parts[0], parts[1]
+        name = ref.split("refs/tags/")[-1]
+        if len(name) > 1 and name[0] == "b" and name[1:].isdigit() and re.fullmatch(r"[0-9a-f]{40}", sha):
+            item = (int(name[1:]), name, sha)
+            if best is None or item[0] > best[0]:
+                best = item
+    return best
 
 
 def systemctl(*args):
@@ -304,15 +356,26 @@ def engine_info():
     else:
         state = "stopped"
     listening = port_open()
+    check = read_json(paths["check"])
+    updating = read_json(paths["update"])
+    build = build_number(record.get("version") or "")
+    latest_build = int(check.get("latest_build") or 0)
+    is_updating = pid_alive(updating.get("pid"))
     return {
         "installed": installed,
         "version": record.get("version") or "",
+        "build": build,
         "commit": record.get("commit") or "",
         "pin": pin.get("commit") or "",
         "state": state if installed else "not_installed",
         "autostart": enabled_text == "enabled",
         "listening": listening,
         "ui": paths["ui"],
+        "latest_build": latest_build,
+        "latest_tag": check.get("latest_tag") or "",
+        "update_available": bool(latest_build and build and latest_build > build and not is_updating),
+        "updating": is_updating,
+        "update_error": "" if is_updating else (updating.get("error") or ""),
     }
 
 
@@ -335,29 +398,90 @@ def engine_action(verb, arg):
         return 0 if code == 0 else 1
     if verb == "engine-check":
         info = engine_info()
-        latest = ""
-        try:
-            remote = subprocess.run(
-                ["git", "ls-remote", "--tags", "https://github.com/halo-box/strix-llama.cpp.git"],
-                capture_output=True, text=True, timeout=20, check=False,
-            )
-            tags = []
-            for line in (remote.stdout or "").splitlines():
-                if "refs/tags/" not in line or "^{}" in line:
-                    continue
-                name = line.split("refs/tags/")[-1]
-                if len(name) > 1 and name[0] == "b" and name[1:].isdigit():
-                    tags.append((int(name[1:]), name))
-            if tags:
-                latest = max(tags)[1]
-        except (OSError, subprocess.TimeoutExpired):
-            latest = ""
-        info["latest_tag"] = latest
-        info["matches_pin"] = bool(info["commit"]) and info["commit"] == info["pin"]
+        latest = newest_halo_tag()
+        installed = build_number(info.get("version") or "")
+        if latest is None:
+            info["success"] = False
+            info["error"] = "Could not check for a newer strix-llama.cpp build."
+            print(json.dumps(info))
+            return 0
+        number, name, commit = latest
+        os.makedirs(os.path.dirname(engine_paths()["check"]), exist_ok=True)
+        with open(engine_paths()["check"], "w") as fh:
+            json.dump({"latest_tag": name, "latest_build": number, "latest_commit": commit}, fh)
+        info["latest_tag"] = name
+        info["latest_build"] = number
+        info["build"] = installed
+        info["update_available"] = bool(installed and number > installed)
+        info["success"] = True
+        if not installed:
+            info["message"] = "strix-llama.cpp is not installed. Newest published build is %s." % number
+        elif number > installed:
+            info["message"] = "A newer strix-llama.cpp is published: build %s. You have build %s." % (number, installed)
+        else:
+            info["message"] = "strix-llama.cpp is the newest published build, %s." % installed
         print(json.dumps(info))
         return 0
+    if verb == "engine-update":
+        print(json.dumps(start_engine_update()))
+        return 0
+    if verb == "engine-update-run":
+        return engine_update_run(arg)
     print("unknown verb: %s" % verb, file=sys.stderr)
     return 2
+
+
+def start_engine_update():
+    info = engine_info()
+    if info.get("state") == "running":
+        return {
+            "success": False,
+            "error": "Stop strix-llama.cpp before updating. The program that is running would be replaced.",
+        }
+    paths = engine_paths()
+    updating = read_json(paths["update"])
+    if pid_alive(updating.get("pid")):
+        return {"success": True, "message": "strix-llama.cpp is already updating."}
+    latest = newest_halo_tag()
+    if latest is None:
+        return {"success": False, "error": "Could not check for a newer strix-llama.cpp build."}
+    number, _name, commit = latest
+    installed = build_number(info.get("version") or "")
+    if installed and number <= installed:
+        return {"success": True, "message": "strix-llama.cpp is already the newest published build, %s." % installed}
+    os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
+    log = open(paths["update_log"], "ab")
+    proc = subprocess.Popen(
+        [os.path.abspath(__file__), "engine-update-run", commit],
+        start_new_session=True,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    with open(paths["update"], "w") as fh:
+        json.dump({"pid": proc.pid, "error": "", "build": number, "commit": commit}, fh)
+    return {
+        "success": True,
+        "message": "Updating strix-llama.cpp to build %s. It will not start." % number,
+    }
+
+
+def engine_update_run(commit):
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
+        print("engine update needs a commit", file=sys.stderr)
+        return 2
+    paths = engine_paths()
+    os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
+    code = subprocess.call([paths["installer"], commit])
+    with open(paths["update"], "w") as fh:
+        if code == 0:
+            json.dump({"pid": 0, "error": "", "commit": commit}, fh)
+        else:
+            json.dump({
+                "pid": 0,
+                "error": "Update failed. See ~/.local/state/omastrix/engine-update.log",
+                "commit": commit,
+            }, fh)
+    return 0 if code == 0 else 1
 
 
 def main():
@@ -377,7 +501,7 @@ def main():
         if os.geteuid() != 0:
             os.execvp("pkexec", ["pkexec", os.path.abspath(__file__), "set-gtt", label])
         return write_gtt(label)
-    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check"):
+    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check", "engine-update", "engine-update-run"):
         arg = sys.argv[2] if len(sys.argv) > 2 else ""
         return engine_action(verb, arg)
     if verb == "library-fetch":

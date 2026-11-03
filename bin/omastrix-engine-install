@@ -6,6 +6,9 @@ ROOT="${HOME}/.local/share/omastrix"
 SRC="${ROOT}/src/strix-llama.cpp"
 BIN="${ROOT}/bin"
 COMMIT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$PIN_FILE")
+if [ $# -gt 0 ]; then
+  COMMIT=$(python3 -c 'import re,sys; c=sys.argv[1]; assert re.fullmatch(r"[0-9a-f]{40}", c); print(c)' "$1")
+fi
 REPO=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$PIN_FILE")
 
 mkdir -p "$ROOT/src" "$BIN" "${HOME}/.config/omastrix" "${HOME}/.local/state/omastrix"

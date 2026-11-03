@@ -157,17 +157,15 @@ Panel {
           refresh()
           return
         }
-        if (info.matches_pin !== undefined) {
+        if (info.latest_build !== undefined || info.matches_pin !== undefined) {
           pendingLoad = ""
           pendingDelete = ""
-          if (info.matches_pin)
-            updateNote = "Installed build matches the approved pin."
-              + (info.latest_tag ? " Newest published Halo build tag: " + info.latest_tag + ". That tag is not installed until the pin changes." : "")
-          else if (info.latest_tag)
-            updateNote = "Installed build is not the approved pin. Newest published Halo build tag: " + info.latest_tag
-          else
-            updateNote = "Could not read a newer tag."
-          errorText = ""
+          if (info.success === false)
+            errorText = info.error || "Could not check for a newer build."
+          else {
+            errorText = ""
+            updateNote = info.message || "Checked for a newer strix-llama.cpp build."
+          }
           refresh()
           return
         }
@@ -358,6 +356,7 @@ Panel {
               text: "strix-llama.cpp  Installed: " + root.installedText
                 + "  Version: " + root.versionText
                 + "  Status: " + root.engineLabel
+                + (root.engine.latest_build ? "  Newest published: build " + root.engine.latest_build : "")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -451,6 +450,34 @@ Panel {
                 enabled: root.engineState === "running"
                 onClicked: root.openInterface()
               }
+              Button {
+                text: "Check for updates"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.engine.installed === true && !root.engineBusy && root.engine.updating !== true
+                onClicked: root.runEngine(["engine-check"])
+              }
+              Button {
+                visible: root.engine.update_available === true || root.engine.updating === true
+                text: root.engine.updating === true ? "Updating strix-llama.cpp" : "Update to build " + root.engine.latest_build
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.engine.updating !== true && !root.engineBusy
+                onClicked: root.runEngine(["engine-update"])
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.engine.update_error !== undefined && root.engine.update_error !== ""
+              wrapMode: Text.Wrap
+              text: root.engine.update_error
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              textFormat: Text.PlainText
             }
 
             Text {
