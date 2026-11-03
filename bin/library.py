@@ -187,7 +187,7 @@ def server_list():
 
 def slot_state(name):
     quoted = urllib.parse.quote(name)
-    data = http_json("/slots?model=" + quoted, timeout=3)
+    data = http_json("/slots?autoload=false&model=" + quoted, timeout=3)
     generating = False
     if isinstance(data, list):
         generating = any(bool(slot.get("is_processing")) for slot in data if isinstance(slot, dict))
@@ -196,7 +196,7 @@ def slot_state(name):
 
 def token_count(name):
     quoted = urllib.parse.quote(name)
-    url = "http://%s:%s/metrics?model=%s" % (HOST, PORT, quoted)
+    url = "http://%s:%s/metrics?autoload=false&model=%s" % (HOST, PORT, quoted)
     try:
         with urllib.request.urlopen(url, timeout=3) as resp:
             text = resp.read().decode("utf-8", "replace")
@@ -657,6 +657,16 @@ def load_checked(model_id, gtt_total_gib, confirm):
     return {"success": True, "id": model_id, "message": row["name"] + " loaded."}
 
 
+def wait_unloaded(name, timeout=60):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        server = server_list()
+        if not server or server.get(name) != "loaded":
+            return True
+        time.sleep(0.4)
+    return False
+
+
 def unload_model(model_id):
     row, _reserve = find_model(model_id)
     name = row["name"] if row else model_id
@@ -668,6 +678,8 @@ def unload_model(model_id):
     result = unload_name(name)
     if result.get("error"):
         return {"success": False, "error": result["error"]}
+    if not wait_unloaded(name):
+        return {"success": False, "error": name + " did not unload."}
     return {"success": True, "message": name + " unloaded."}
 
 

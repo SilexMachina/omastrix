@@ -13,5 +13,6 @@
 - Check for updates names the newest published strix-llama.cpp build. Update installs that build when the program is stopped.
 - Add model takes a direct link to one .gguf file. It adds a row and does not download.
 - An installing row shows a progress bar and the bytes received.
+- Unload stays unloaded. The panel no longer reloads the model by asking about it.
 - Setup does not download a model. Starter library is six click-to-install rows. The pill always shows GTT used and ceiling.
 - The library shows only models that fit this machine. Too-large rows are behind a control, with the shortfall noted.
