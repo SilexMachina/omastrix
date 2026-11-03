@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -250,6 +251,7 @@ def library_view(gtt_total_gib):
             "test": bool(row.get("test")),
             "size_gib": size_label(need),
             "installed": installed,
+            "deletable": any(item["have"] > 0 for item in files) or bool(state.get("running")),
             "status": status,
             "have_bytes": have,
             "need_bytes": need,
@@ -516,6 +518,122 @@ def unload_model(model_id):
     if result.get("error"):
         return {"success": False, "error": result["error"]}
     return {"success": True, "message": name + " unloaded."}
+
+
+def catalog_paths(row):
+    paths = []
+    for item in row["files"]:
+        dest = dest_for(item["path"])
+        if os.path.isfile(dest) and not os.path.islink(dest):
+            paths.append(dest)
+    return paths
+
+
+def remove_catalog_file(dest):
+    root = os.path.realpath(models_root())
+    real = os.path.realpath(dest)
+    if real != root and not real.startswith(root + os.sep):
+        raise ValueError("refusing to delete outside ~/models")
+    if os.path.islink(dest) or not os.path.isfile(dest):
+        raise ValueError("refusing to delete a non-file")
+    os.remove(dest)
+
+
+def prune_empty_dirs(start):
+    root = os.path.realpath(models_root())
+    path = os.path.realpath(start)
+    while path != root and path.startswith(root + os.sep):
+        try:
+            if os.listdir(path):
+                return
+            os.rmdir(path)
+        except OSError:
+            return
+        path = os.path.dirname(path)
+
+
+def stop_download(model_id):
+    state = download_state(model_id)
+    raw_pid = state.get("pid")
+    if not isinstance(raw_pid, int) or not pid_alive(raw_pid):
+        write_download_state(model_id, {"pid": 0, "error": ""})
+        return
+    pid = raw_pid
+    try:
+        raw = open("/proc/%s/cmdline" % pid, "rb").read()
+    except OSError:
+        write_download_state(model_id, {"pid": 0, "error": ""})
+        return
+    parts = raw.split(b"\x00")
+    cmd = [part.decode("utf-8", "replace") for part in parts if part]
+    if "library-fetch" not in cmd or model_id not in cmd:
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.time() + 5
+    while time.time() < deadline and pid_alive(pid):
+        time.sleep(0.1)
+    if pid_alive(pid):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    write_download_state(model_id, {"pid": 0, "error": ""})
+
+
+def delete_model(model_id, gtt_total_gib, confirm):
+    row, _reserve = find_model(model_id)
+    if row is None:
+        return {"success": False, "id": model_id, "error": "Unknown model"}
+    present = catalog_paths(row)
+    running = download_state(model_id).get("running")
+    if not present and not running:
+        return {"success": False, "id": model_id, "error": row["name"] + " is not installed."}
+    server = server_list()
+    loaded = ""
+    if server:
+        loaded = next((name for name, status in server.items() if status == "loaded"), "")
+    loaded_this = loaded == row["name"]
+    if not confirm:
+        if loaded_this:
+            msg = "Delete will unload %s and remove its files from ~/models. Click Delete again." % row["name"]
+        elif running:
+            msg = "Delete will stop the download and remove %s from ~/models. Click Delete again." % row["name"]
+        else:
+            msg = "Delete will remove %s from ~/models. Click Delete again." % row["name"]
+        return {
+            "success": False,
+            "needs_confirm": True,
+            "confirm": "delete",
+            "id": model_id,
+            "error": msg,
+        }
+    if running:
+        stop_download(model_id)
+    if loaded_this:
+        result = unload_name(row["name"])
+        if result.get("error"):
+            return {"success": False, "id": model_id, "error": "Could not unload before delete: " + result["error"]}
+    removed = 0
+    parents = []
+    for dest in catalog_paths(row):
+        remove_catalog_file(dest)
+        removed += 1
+        parents.append(os.path.dirname(dest))
+    for parent in sorted(parents, key=len, reverse=True):
+        prune_empty_dirs(parent)
+    write_download_state(model_id, {"pid": 0, "error": ""})
+    write_preset(gtt_total_gib)
+    if server is not None and not loaded_name():
+        reload_server()
+    return {
+        "success": True,
+        "id": model_id,
+        "removed": removed,
+        "message": row["name"] + " was removed from ~/models. It is not loaded.",
+    }
 
 
 def main(argv):

@@ -15,6 +15,7 @@ Panel {
   property bool settingGtt: false
   property bool engineBusy: false
   property string pendingLoad: ""
+  property string pendingDelete: ""
   property string updateNote: ""
   property string addLink: ""
 
@@ -57,7 +58,7 @@ Panel {
   readonly property int colRam: Style.space(100)
   readonly property int colEngine: Style.space(170)
   readonly property int colNotes: Style.space(240)
-  readonly property int colAction: Style.space(120)
+  readonly property int colAction: Style.space(230)
 
   readonly property var gttOptions: [
     { value: "64", label: "64 GB", tooltip: root.tipFor("64") },
@@ -145,13 +146,20 @@ Panel {
       try {
         var info = JSON.parse(body)
         if (info.needs_confirm) {
-          pendingLoad = info.id || ""
-          errorText = info.error || "Confirm the load."
+          if (info.confirm === "delete") {
+            pendingDelete = info.id || ""
+            pendingLoad = ""
+          } else {
+            pendingLoad = info.id || ""
+            pendingDelete = ""
+          }
+          errorText = info.error || "Confirm."
           refresh()
           return
         }
         if (info.matches_pin !== undefined) {
           pendingLoad = ""
+          pendingDelete = ""
           if (info.matches_pin)
             updateNote = "Installed build matches the approved pin."
               + (info.latest_tag ? " Newest published Halo build tag: " + info.latest_tag + ". That tag is not installed until the pin changes." : "")
@@ -164,6 +172,7 @@ Panel {
           return
         }
         pendingLoad = ""
+        pendingDelete = ""
         if (info.success === false)
           errorText = info.error || "That did not work."
         else {
@@ -187,6 +196,13 @@ Panel {
       runEngine(["library-load", id, "--confirm"])
     else
       runEngine(["library-load", id])
+  }
+
+  function deleteModel(id) {
+    if (pendingDelete === id)
+      runEngine(["library-delete", id, "--confirm"])
+    else
+      runEngine(["library-delete", id])
   }
 
   function openInterface() {
@@ -274,7 +290,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(1680))
+    contentWidth: panel.fittedContentWidth(Style.space(1860))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(1280))
 
     PanelKeyCatcher {
@@ -622,38 +638,51 @@ Panel {
                   textFormat: Text.PlainText
                   anchors.verticalCenter: parent.verticalCenter
                 }
-                Button {
-                  property string rowId: modelData.id
-                  property bool rowInstalled: modelData.installed === true
-                  property string rowStatus: modelData.status || ""
-                  property string rowLabel: modelData.status_label || ""
-                  property bool rowFits: modelData.fits === true
-                  text: {
-                    if (!rowInstalled)
-                      return rowStatus === "downloading" ? "Installing" : "Install"
-                    if (rowLabel === "Loaded" || rowLabel === "Inferring")
-                      return "Unload"
-                    return "Load"
+                Row {
+                  spacing: Style.space(6)
+                  Button {
+                    property string rowId: modelData.id
+                    property bool rowInstalled: modelData.installed === true
+                    property string rowStatus: modelData.status || ""
+                    property string rowLabel: modelData.status_label || ""
+                    property bool rowFits: modelData.fits === true
+                    text: {
+                      if (!rowInstalled)
+                        return rowStatus === "downloading" ? "Installing" : "Install"
+                      if (rowLabel === "Loaded" || rowLabel === "Inferring")
+                        return "Unload"
+                      return "Load"
+                    }
+                    fontSize: Style.font.title
+                    fontFamily: root.fontFamily
+                    foreground: root.foreground
+                    enabled: {
+                      if (root.engineBusy)
+                        return false
+                      if (!rowInstalled)
+                        return rowStatus !== "downloading"
+                      if (rowLabel === "Loaded" || rowLabel === "Inferring")
+                        return true
+                      return rowFits
+                    }
+                    onClicked: {
+                      if (!rowInstalled)
+                        root.runEngine(["library-download", rowId])
+                      else if (rowLabel === "Loaded" || rowLabel === "Inferring")
+                        root.runEngine(["library-unload", rowId])
+                      else
+                        root.loadModel(rowId)
+                    }
                   }
-                  fontSize: Style.font.title
-                  fontFamily: root.fontFamily
-                  foreground: root.foreground
-                  enabled: {
-                    if (root.engineBusy)
-                      return false
-                    if (!rowInstalled)
-                      return rowStatus !== "downloading"
-                    if (rowLabel === "Loaded" || rowLabel === "Inferring")
-                      return true
-                    return rowFits
-                  }
-                  onClicked: {
-                    if (!rowInstalled)
-                      root.runEngine(["library-download", rowId])
-                    else if (rowLabel === "Loaded" || rowLabel === "Inferring")
-                      root.runEngine(["library-unload", rowId])
-                    else
-                      root.loadModel(rowId)
+                  Button {
+                    property string rowId: modelData.id
+                    visible: modelData.deletable === true
+                    text: root.pendingDelete === rowId ? "Confirm" : "Delete"
+                    fontSize: Style.font.title
+                    fontFamily: root.fontFamily
+                    foreground: root.foreground
+                    enabled: !root.engineBusy
+                    onClicked: root.deleteModel(rowId)
                   }
                 }
               }

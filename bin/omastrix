@@ -394,6 +394,12 @@ def main():
     if verb == "library-unload":
         print(json.dumps(library.unload_model(sys.argv[2] if len(sys.argv) > 2 else "")))
         return 0
+    if verb == "library-delete":
+        model_id = sys.argv[2] if len(sys.argv) > 2 else ""
+        confirm = "--confirm" in sys.argv
+        snap = snapshot()
+        print(json.dumps(library.delete_model(model_id, snap.get("gtt_total_gib"), confirm)))
+        return 0
     if verb == "webui-install-run":
         return webui.install()
     if verb == "webui-install":
