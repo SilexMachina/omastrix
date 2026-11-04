@@ -16,4 +16,5 @@
 - Unload stays unloaded. The panel no longer reloads the model by asking about it.
 - Open WebUI can be checked and updated the same way as strix-llama.cpp.
 - Setup does not download a model. Starter library is six click-to-install rows. The pill always shows GTT used and ceiling.
-- The library shows only models that fit this machine. Too-large rows are behind a control, with the shortfall noted.
+- The model table shows every catalog row. A model that does not fit stays visible. Notes state the shortfall. Load stays refused.
+- `AGENTS.md` and `README.md` match the program. The October 2026 contract is retired.

@@ -13,11 +13,11 @@ OmaStrix composes, manages, and monitors the stack that already runs local model
 That stack, named so the plugin does not invent a second one:
 
 - One engine: native `halo-box/strix-llama.cpp`, Vulkan, RADV. Not Docker, not Ollama, not stock llama.cpp as the daily binary, not a container toolkit.
-- One server on `127.0.0.1:8080`. A router with presets, one model loaded.
+- One server on `127.0.0.1:8080`. A router with presets, one model loaded. llama stays on loopback.
 - GGUFs on local disk, pinned by revision and SHA-256.
 - A GTT ceiling high enough for the model and low enough that the desktop still has RAM.
 - A recipe per model: context, serve flags, optional extra files. The flags that matter on this iGPU are `-fa on`, `--load-mode none`, `-fit off` when context is explicit, and `-c` from the recipe.
-- Loopback only. Remote use is a later front door, discussed before it exists.
+- Open WebUI is the front door, on port 3000, in its own user-profile install. It is not a second inference engine.
 
 A person with a fresh Omarchy install on a Strix Halo machine adds the plugin, runs core setup, and has a working local model. After that, the same panel is the command center: what is loaded, what fits, what is generating, what it cost in tokens.
 
@@ -88,13 +88,13 @@ There is no Qwen 3.6 25B-A3B. The measured fast coder is **Qwen3.6-35B-A3B**.
 
 The library grows by testing. A new row is added only after the pinned engine loads it on a Strix Halo machine and returns one completion. The row records that machine class. A speed number is added only when one was measured. The six above are the start.
 
-The default library view shows only models that fit this machine. The catalog names one recommended row per tier, and that row is first:
+The model table shows every catalog row. The catalog names one recommended row per tier:
 
 - 27B does not fit: recommend Qwen3.5-9B. The test model stays in the list.
 - 27B fits and Flash-Next does not: recommend Qwen3.6-35B-A3B.
 - Flash-Next fits: recommend Qwen3.8-27B. Flash-Next and V4-Flash stay in the list. They are not first, so a new 128 GB user is not dropped onto an 87 GiB download.
 
-Other models that fit follow in catalog order. Models that do not fit are not in that list. A control, off by default, shows them under "Too large for this system," each with the shortfall in GiB. They cannot be loaded from that group.
+Other models follow in catalog order, including ones that do not fit. Notes state the shortfall. Load stays refused. There is no hidden too-large list.
 
 Speed numbers already measured on this Ryzen AI Max+ 395 / 128 GB box, Vulkan RADV, stay labeled that way: 35B-A3B about 55 tok/s decode, 27B Q4 about 26 tok/s with MTP, V4-Flash about 15–17 tok/s. No number yet for 4B, 9B, or Flash-Next. Those rows ship without a speed until one is measured.
 
@@ -102,7 +102,9 @@ Personal picks from this box (abliterated twins, a sidecar on another port, tail
 
 ## Command center
 
-The panel after setup:
+The panel is two bordered panes. System is on top. The model table is under it. Title: OmaStrix. Subtitle: Local AI for Strix Halo.
+
+After setup, that panel is:
 
 - Engine up or down. One button to start or stop the router. After a reboot nothing is listening until this runs.
 - Which model is loaded. Load and unload. One model at a time. Unload is explicit. Choosing another model unloads the current one first, and the panel says that before it does it.
@@ -116,12 +118,12 @@ The bar pill stays short. GTT used/ceiling is always there. A loaded model adds 
 ## What it will not do
 
 - Install Docker, Ollama, LM Studio, or a second llama.cpp.
-- Bind the server to `0.0.0.0`.
+- Bind llama-server to `0.0.0.0`. Open WebUI listens on `0.0.0.0:3000`.
 - Edit kernel cmdline without a confirm, reboot without a confirm, or disable IOMMU.
 - Run setup because the plugin was added or updated.
 - Download a catalog model because setup finished.
 - Attach a projector or a draft model because the file is on disk.
-- Open WebUI, or rewire Hermes, in the same release as the wizard. Those are later, and each one waits for a yes.
+- Treat the hand Open WebUI install as the product copy, or read its secret. The product copy is installed and updated from the panel. Hermes wiring stays off this panel.
 - Pretend to be a general local-AI plugin. Sero's Local AI covers discrete cards and containers. OmaStrix covers this host class and this engine.
 
 ## How it is built
@@ -148,7 +150,7 @@ Load goes through the router the way this binary already accepts, not through a 
 
 ## Look
 
-Omarchy's own panels are the bar. Agents is the reference: a hero line, section headers, meters, monospace rows, a keyboard cursor, theme color, no private palette. `omarchy dev ui-preview` is the component gallery.
+Omarchy's own panels are the bar. The shipped OmaStrix panel is two bordered panes and a model table, not a stats dashboard. Theme color, no private palette. `omarchy dev ui-preview` is the component gallery.
 
 The panel uses the shell UI kit (`qs.Ui`, `qs.Commons`): `Panel`, `PanelHero`, `PanelSectionHeader`, `PanelActionButton`, `Color`, `Style`. Colors come from `Color` and from the bar facade (`foreground`, `background`, `accent`, `urgent`, font). No hex palette in our QML. Light themes have to work. Tokyo Night and Nord are not the only skins.
 
@@ -160,20 +162,9 @@ The pill uses the bar's font and foreground. It does not draw its own chrome.
 
 ## Agents
 
-Two copies of the same instructions:
+`AGENTS.md` at the root of the repo is the operating contract. The plugin directory is that same checkout, so an agent on the machine reads the same file. `omastrix help` is not a verb yet. Do not invent it.
 
-- `AGENTS.md` at the root of the repo, for an agent working on OmaStrix.
-- The same file installed where an agent on a user's machine can find it without cloning the repo: the plugin directory, plus `omastrix help` printing the short contract.
-
-The contract says:
-
-- This is Strix Halo on Omarchy. One engine. One server at `http://127.0.0.1:8080/v1`. One model loaded.
-- `omastrix snapshot` is the state. Read that before claiming a model is loaded, a download finished, or GTT changed.
-- Verbs: status, setup status, download, load, unload, fit. Download does not load. Load of an unfit recipe fails with the numbers.
-- Do not install Docker or a second engine. Do not bind the server off loopback. Do not set `amd_iommu=off`. Do not raise GTT except through the wizard's formula, and only after the user confirms. Do not pass a projector or a draft file unless the user asked.
-- Where models, the engine tree, and the ledger live.
-
-An agent opening a coding session pointed at the endpoint is a later slice. Until then the agent reads the contract and uses the verbs. We do not rewrite the agent's own config as a side effect of setup.
+A new session reads `AGENTS.md` and this file before changing the plugin. Live state is `bin/omastrix snapshot`. We do not rewrite the agent's own config as a side effect of setup.
 
 ## Shipping it
 
@@ -201,10 +192,10 @@ Issues on GitHub are for bugs and recipe requests. A short `CONTRIBUTING.md` say
 |---|---|
 | 0.1 | Repo layout, manifest validates, host probe, themed empty panel, pill, `AGENTS.md`. Old pill still on the bar. |
 | 0.2 | Core setup through a verified engine. GTT offer with a confirm and a reboot he starts. No model download. |
-| 0.3 | Starter library of six, click-to-download with hash check, load/unload with the recipe, unfit reason before the load. GTT used/ceiling on the pill. |
-| 0.4 | Inferring mark, tokens since load, lifetime ledger. |
+| 0.3 | Starter library, click-to-download, load/unload, the two-pane panel, Open WebUI, and check/update for the engine and Open WebUI. In the tree. Not tagged. |
+| 0.4 | Inferring mark, tokens since load, lifetime ledger. Inferring is on the table. The lifetime ledger is not. |
 | 0.5 | First tagged release. Public only if he says so. |
-| Later | Open an agent on the endpoint without editing its config. Optional front door for other machines. More measured recipes, including smaller Strix Halo SKUs when we have a number from one. |
+| Later | Open an agent on the endpoint without editing its config. More measured recipes, including smaller Strix Halo SKUs when we have a number from one. |
 
 Each cut is usable on this box before the next one starts. A cut that needs a reboot or a password stops and asks.
 
