@@ -51,7 +51,7 @@ Ordered. Each step shows what it found and what it is about to do. A failed step
 
 The library root is `~/models`. The catalog stores paths relative to that folder. The generated preset is `~/.config/omastrix/models.ini` and uses this user's absolute paths. Do not point `--models-dir` at `~/models`. A pasted link has to be a direct https link to one complete `.gguf` file. It is stored in `~/.config/omastrix/added.json`, not in the shipped catalog. Add does not download or load. Delete removes that row's catalog files after a second click. It leaves other files in the same folder. If that model is loaded, the second click unloads it first. It does not restart the engine while another model is loaded.
 
-Open WebUI is a separate user program under `~/.local/share/omastrix/webui`, with settings in `~/.config/omastrix/webui.env` and user service `omastrix-webui`. It listens on `0.0.0.0:3000`. llama stays on `127.0.0.1:8080`. Signup is off. A hand install under `~/.local/share/open-webui` is not this program.
+Open WebUI is a separate user program under `~/.local/share/omastrix/webui`, with settings in `~/.config/omastrix/webui.env` and user service `omastrix-webui`. It listens on `0.0.0.0:3000`. llama stays on `127.0.0.1:8080`. Signup is off. A hand install under `~/.local/share/open-webui` is not this program. Check for updates names the newest published version. Update installs that version when Open WebUI is stopped. It does not start the program.
 
 ## Catalog and recipes
 

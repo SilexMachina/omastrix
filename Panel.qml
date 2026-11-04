@@ -95,7 +95,8 @@ Panel {
     try {
       var next = JSON.parse(String(raw || "").trim())
       payload = next
-      if (errorText.indexOf("Stop strix-llama.cpp before updating") === 0 && next.engine && next.engine.state !== "running")
+      if ((errorText.indexOf("Stop strix-llama.cpp before updating") === 0 && next.engine && next.engine.state !== "running")
+          || (errorText.indexOf("Stop Open WebUI before updating") === 0 && next.webui && next.webui.running !== true))
         errorText = ""
     } catch (e) {
       errorText = "status parse failed"
@@ -505,7 +506,8 @@ Panel {
               width: parent.width
               text: "Open WebUI  Installed: " + (root.webui.installed === true ? "Yes" : "No")
                 + (root.webui.version ? "  Version: " + root.webui.version : "")
-                + "  Status: " + (root.webui.state === "installing" ? "Installing" : (root.webui.running === true ? "Running" : "Stopped"))
+                + "  Status: " + (root.webui.updating === true ? "Updating" : (root.webui.state === "installing" ? "Installing" : (root.webui.running === true ? "Running" : "Stopped")))
+                + (root.webui.latest_version ? "  Newest published: " + root.webui.latest_version : "")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -549,6 +551,34 @@ Panel {
                     bar.run("xdg-open http://127.0.0.1:3000")
                 }
               }
+              Button {
+                text: "Check for updates"
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.webui.installed === true && !root.engineBusy && root.webui.updating !== true
+                onClicked: root.runEngine(["webui-check"])
+              }
+              Button {
+                visible: root.webui.update_available === true || root.webui.updating === true
+                text: root.webui.updating === true ? "Updating Open WebUI" : "Update to " + root.webui.latest_version
+                fontSize: Style.font.title
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                enabled: root.webui.updating !== true && !root.engineBusy
+                onClicked: root.runEngine(["webui-update"])
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.webui.update_available === true && root.webui.running === true
+              wrapMode: Text.Wrap
+              text: "Stop Open WebUI before updating. The program that is running would be replaced."
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              textFormat: Text.PlainText
             }
           }
         }
