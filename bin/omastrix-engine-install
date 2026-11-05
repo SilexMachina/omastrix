@@ -3,44 +3,227 @@
 set -eu
 PIN_FILE="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)/engine-pin.json"
 ROOT="${HOME}/.local/share/omastrix"
-SRC="${ROOT}/src/strix-llama.cpp"
 BIN="${ROOT}/bin"
-COMMIT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$PIN_FILE")
-if [ $# -gt 0 ]; then
-  COMMIT=$(python3 -c 'import re,sys; c=sys.argv[1]; assert re.fullmatch(r"[0-9a-f]{40}", c); print(c)' "$1")
+# Refuse redirected parent directories before even opening the operation lock.
+check_layout() {
+  python3 - << 'PY'
+from pathlib import Path
+import stat, sys
+home = Path.home()
+for relative in (".local/share/omastrix/src", ".local/share/omastrix/bin",
+                 ".local/state/omastrix", ".config/omastrix",
+                 ".config/systemd/user"):
+    path = home
+    for part in Path(relative).parts:
+        path /= part
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            sys.exit("Unsafe installation directory: " + str(path))
+for relative in (".local/share/omastrix/bin/llama-server",
+                 ".local/share/omastrix/bin/llama-cli",
+                 ".local/share/omastrix/bin/llama-bench",
+                 ".config/omastrix/llama.env", ".config/omastrix/models.ini",
+                 ".config/omastrix/engine.json",
+                 ".config/systemd/user/omastrix-llama.service",
+                 ".local/share/omastrix/.engine-install.lock",
+                 ".local/state/omastrix/engine.lock"):
+    path = home / relative
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        continue
+    # Final publication symlinks are replaced, never followed. The lock is opened.
+    if not stat.S_ISREG(mode) and not (stat.S_ISLNK(mode) and path.name not in (".engine-install.lock", "engine.lock")):
+        sys.exit("Unsafe installation destination: " + str(path))
+PY
+}
+check_layout
+command -v flock >/dev/null 2>&1 || { echo "Missing build dependency: flock (util-linux)." >&2; exit 1; }
+mkdir -p "$ROOT" "${HOME}/.local/state/omastrix"
+# Share the Python engine-operation lock; retain the legacy installer lock too.
+if [ "${OMASTRIX_ENGINE_LOCK_FD+x}" = x ]; then
+  # An environment flag is not a lock bypass: require an inherited descriptor
+  # for this exact regular lock file, then flock that open description below.
+  python3 - << 'PY'
+import os, stat, sys
+from pathlib import Path
+try:
+    raw = os.environ["OMASTRIX_ENGINE_LOCK_FD"]
+    if not raw.isascii() or not raw.isdecimal() or int(raw) < 3:
+        raise ValueError("invalid lock descriptor")
+    inherited = os.fstat(int(raw))
+    expected = (Path.home() / ".local/state/omastrix/engine.lock").stat()
+    if not stat.S_ISREG(inherited.st_mode) or (inherited.st_dev, inherited.st_ino) != (expected.st_dev, expected.st_ino):
+        raise ValueError("lock descriptor does not match engine.lock")
+except (OSError, ValueError) as exc:
+    sys.exit("Invalid inherited engine lock: " + str(exc))
+PY
+  flock -n "$OMASTRIX_ENGINE_LOCK_FD" || { echo "Engine operation already in progress." >&2; exit 1; }
+else
+  exec 8>"${HOME}/.local/state/omastrix/engine.lock"
+  flock -n 8 || { echo "Engine operation already in progress." >&2; exit 1; }
 fi
-REPO=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$PIN_FILE")
+exec 9>"$ROOT/.engine-install.lock"
+flock -n 9 || { echo "Engine install/update already in progress." >&2; exit 1; }
+if [ $# -eq 0 ] && { [ -e "${HOME}/.config/omastrix/engine.json" ] || [ -L "${HOME}/.config/omastrix/engine.json" ] || [ -e "$BIN/llama-server" ] || [ -L "$BIN/llama-server" ]; }; then
+  echo "Engine already installed. Use the explicit update action; first install will not downgrade it." >&2
+  exit 1
+fi
+[ $# -le 1 ] && { [ $# -eq 0 ] || [ -n "$1" ]; } || { echo "Usage: omastrix-engine-install [40-character update commit]" >&2; exit 2; }
+# The manifest is data, not a git transport selector. Validate both entry paths.
+COMMIT=$(python3 - "$PIN_FILE" "${1-}" << 'PY'
+import json, re, sys
+try:
+    pin = json.load(open(sys.argv[1]))
+    if pin.get("repo") != "https://github.com/halo-box/strix-llama.cpp.git":
+        raise ValueError("repository must be halo-box/strix-llama.cpp over HTTPS")
+    if not isinstance(pin.get("commit"), str) or not re.fullmatch(r"[0-9a-f]{40}", pin["commit"]):
+        raise ValueError("pin commit must be 40 lowercase hexadecimal characters")
+    commit = sys.argv[2] or pin["commit"]
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("update commit must be 40 lowercase hexadecimal characters")
+    print(commit)
+except (OSError, ValueError, AttributeError) as exc:
+    sys.exit("Invalid engine pin: " + str(exc))
+PY
+)
+REPO=https://github.com/halo-box/strix-llama.cpp.git
+for dependency in git cmake ninja c++ glslc pkg-config systemctl; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    echo "Missing build dependency: $dependency. Run: omarchy pkg add base-devel git cmake ninja vulkan-headers vulkan-tools spirv-headers shaderc vulkan-radeon" >&2
+    exit 1
+  }
+done
+# Embed the backend probe without importing service/model code. Wrappers re-probe
+# the current host and remain independent of this checkout after installation.
+HOST_PROBE_CODE=$(python3 - "${PIN_FILE%/*}/bin/omastrix" << 'PY'
+import ast, sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+names = {"read_text", "gpu_devices", "lspci_name", "is_strix_halo", "host_probe"}
+nodes = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name in names]
+if {n.name for n in nodes} != names:
+    sys.exit("Missing backend hardware probe")
+print("import glob, os, subprocess, sys")
+for node in nodes:
+    print(ast.get_source_segment(source, node))
+PY
+)
+HARDWARE_SUPPORTED=$(python3 -c "$HOST_PROBE_CODE
+print('yes' if host_probe()[-1] else 'no')")
+RADV_ICD=
+if [ "$HARDWARE_SUPPORTED" = yes ]; then
+# Arch has shipped both radeon_icd.json and radeon_icd.x86_64.json.
+# An explicit override also supports a nonstandard Mesa installation.
+RADV_ICD=$(python3 - << 'PY'
+import json, os, sys
+from pathlib import Path
+explicit = os.environ.get("OMASTRIX_RADV_ICD")
+candidates = [Path(explicit)] if explicit else [p for root in ("/usr/share", "/usr/local/share", "/etc") for p in sorted(Path(root, "vulkan/icd.d").glob("radeon_icd*.json"))]
+for path in candidates:
+    try:
+        data = json.loads(path.read_text())
+        library = str(data.get("ICD", {}).get("library_path", "")).lower()
+        if ("radeon" in library or "radv" in library) and not any(ord(c) < 32 for c in str(path)):
+            print(path.resolve())
+            break
+    except (OSError, ValueError, AttributeError):
+        pass
+else:
+    sys.exit("RADV ICD not found or invalid. Run: omarchy pkg add vulkan-radeon")
+PY
+)
+fi
+
+# Fail closed: never replace an active engine, including activation/deactivation.
+check_stopped() {
+  SERVICE_STATE=$(systemctl --user show omastrix-llama.service --property=LoadState --property=ActiveState --property=SubState) || {
+    echo "Cannot verify the engine is stopped; stop it and check the user service manager." >&2
+    exit 1
+  }
+  printf '%s\n' "$SERVICE_STATE" | python3 -c '
+import sys
+values = {}
+for line in sys.stdin.read().splitlines():
+    key, sep, value = line.partition("=")
+    if not sep or key in values:
+        sys.exit("Cannot verify the engine is stopped: malformed service state")
+    values[key] = value
+if (values.get("LoadState") not in ("loaded", "not-found")
+        or values.get("ActiveState") not in ("inactive", "failed")
+        or values.get("SubState") not in ("dead", "failed")):
+    sys.exit("Cannot verify the engine is stopped; stop it and check the user service manager.")
+'
+}
+check_stopped
 
 mkdir -p "$ROOT/src" "$BIN" "${HOME}/.config/omastrix" "${HOME}/.local/state/omastrix"
 
-if [ ! -d "$SRC/.git" ]; then
-  git clone "$REPO" "$SRC"
-fi
-git -C "$SRC" fetch --tags origin
-git -C "$SRC" checkout --detach "$COMMIT"
+# A private build directory never rewrites the legacy checkout or a published
+# binary, even if somebody starts the service while this build is running.
+SRC=$(mktemp -d "$ROOT/src/strix-llama.cpp-${COMMIT}.XXXXXX")
+BUILD_NAME=${SRC##*/}
+KEEP_BUILD=0
+trap 'if [ "$KEEP_BUILD" -eq 0 ] && [ ! -e "$SRC/.keep-build" ]; then rm -rf -- "$SRC"; fi' 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
+git -c core.hooksPath=/dev/null -c init.templateDir= clone --no-checkout --filter=blob:none -- "$REPO" "$SRC"
+git -C "$SRC" -c core.hooksPath=/dev/null fetch origin "$COMMIT"
+git -C "$SRC" -c core.hooksPath=/dev/null checkout --detach "$COMMIT"
+ACTUAL_COMMIT=$(git -C "$SRC" rev-parse --verify 'HEAD^{commit}')
+[ "$ACTUAL_COMMIT" = "$COMMIT" ] || { echo "Checked-out commit does not match the engine pin." >&2; exit 1; }
 
 cmake -B "$SRC/build" -S "$SRC" -G Ninja \
   -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build "$SRC/build" --config Release -j
+cmake --build "$SRC/build" --config Release --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" \
+  --target llama-server llama-cli llama-bench
 
-for tool in llama-server llama-cli llama-bench; do
-  cat > "$BIN/$tool" << EOF
-#!/bin/sh
-set -eu
-. "\${HOME}/.config/omastrix/llama.env"
-exec "\${HOME}/.local/share/omastrix/src/strix-llama.cpp/build/bin/${tool}" "\$@"
-EOF
-  chmod 755 "$BIN/$tool"
-done
+# Probe the staged binary before publishing wrappers, units, or a success record.
+HARDWARE_ACCEPTANCE=skipped_unsupported_host
+DEVICES="Strix RADV device/heap acceptance skipped: unsupported host (not verified)."
+if [ "$HARDWARE_SUPPORTED" = yes ]; then
+DEVICES=$(VK_DRIVER_FILES="$RADV_ICD" AMD_VULKAN_ICD=RADV \
+  "$SRC/build/bin/llama-cli" --list-devices 2>&1) || {
+  echo "RADV device verification failed: $DEVICES" >&2
+  exit 1
+}
+printf '%s\n' "$DEVICES" | python3 -c '
+import re, sys
+from pathlib import Path
+text = sys.stdin.read()
+heaps = []
+for line in text.splitlines():
+    match = re.search(r"\(([0-9]+) MiB,", line)
+    if "Vulkan" in line and "RADV" in line and re.search(r"STRIX[_ ]HALO|gfx1151", line, re.I) and match:
+        heaps.append(int(match.group(1)))
+ceilings = []
+for path in Path("/sys/class/drm").glob("card[0-9]*/device/mem_info_gtt_total"):
+    try:
+        ceilings.append(int(path.read_text()) / (1024 * 1024))
+    except (OSError, ValueError):
+        pass
+minimum = max(1024, max(ceilings, default=0) * 0.75)
+if not heaps or max(heaps) < minimum:
+    sys.exit("RADV device verification failed: need a Strix Halo Vulkan heap near the live GTT ceiling. " + text)
+'
+HARDWARE_ACCEPTANCE=verified_strix_radv_heap
+else
+  echo "Unsupported host preview: Strix RADV device/heap acceptance skipped, not verified." >&2
+fi
 
-cat > "${HOME}/.config/omastrix/llama.env" << 'EOF'
-# Applied only to the OmaStrix llama process.
-export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json
-export AMD_VULKAN_ICD=RADV
-EOF
-
-mkdir -p "${HOME}/.config/systemd/user"
-cat > "${HOME}/.config/systemd/user/omastrix-llama.service" << 'EOF'
+VERSION=$("$SRC/build/bin/llama-server" --version 2>&1) || {
+  echo "Engine version verification failed: $VERSION" >&2
+  exit 1
+}
+VERSION=$(printf '%s\n' "$VERSION" | python3 -c '
+import sys
+lines = [line.removeprefix("version: ").strip() for line in sys.stdin.read().splitlines() if line.startswith("version: ")]
+if not lines or not lines[0]:
+    sys.exit("Engine version verification failed: missing version line")
+print(lines[0])
+')
+check_stopped
+check_layout
+cat > "$SRC/omastrix-llama.service" << 'EOF'
 [Unit]
 Description=OmaStrix strix-llama.cpp
 After=default.target
@@ -56,24 +239,137 @@ StandardError=append:%h/.local/state/omastrix/llama.log
 [Install]
 WantedBy=default.target
 EOF
+for tool in llama-server llama-cli llama-bench; do
+  cat > "$SRC/wrapper-$tool" << EOF
+#!/bin/sh
+set -eu
+if [ "\$#" -ne 1 ] || [ "\${1-}" != --version ]; then
+python3 - << 'OMASTRIX_HOST_GUARD'
+$HOST_PROBE_CODE
+if not host_probe()[-1]:
+    sys.exit("Unsupported host: engine execution requires amdgpu Strix Halo; install-only preview.")
+OMASTRIX_HOST_GUARD
+fi
+. "\${HOME}/.config/omastrix/llama.env"
+exec "\${HOME}/.local/share/omastrix/src/${BUILD_NAME}/build/bin/${tool}" "\$@"
+EOF
+  chmod 755 "$SRC/wrapper-$tool"
+done
 
-systemctl --user daemon-reload
-# Leave the service stopped and not enabled. The panel owns start and autostart.
-
-VERSION=$("$BIN/llama-server" --version 2>&1 | head -1)
-VERSION=${VERSION#version: }
-python3 - "$VERSION" "$COMMIT" << 'PY'
-import json, sys, time
+python3 - "$RADV_ICD" > "$SRC/llama.env" << 'PY'
+import shlex, sys
+print("# Applied only to the OmaStrix llama process.")
+if sys.argv[1]:
+    print("export VK_DRIVER_FILES=" + shlex.quote(sys.argv[1]))
+    print("export AMD_VULKAN_ICD=RADV")
+PY
+python3 - "$SRC" "$VERSION" "$COMMIT" "$HARDWARE_ACCEPTANCE" << 'PY'
+import json, os, shutil, signal, stat, subprocess, sys, tempfile, time
 from pathlib import Path
-version, commit = sys.argv[1], sys.argv[2]
-path = Path.home() / ".config/omastrix/engine.json"
-path.write_text(json.dumps({
+source, version, commit = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+home = Path.home()
+config = home / ".config/omastrix"
+unit = home / ".config/systemd/user/omastrix-llama.service"
+record = json.dumps({
     "commit": commit,
     "version": version,
+    "hardware_acceptance": sys.argv[4],
     "bin": str(Path.home() / ".local/share/omastrix/bin/llama-server"),
     "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-}, indent=2) + "\n")
-PY
+}, indent=2) + "\n"
+files = [(home / ".local/share/omastrix/bin" / tool,
+          (source / ("wrapper-" + tool)).read_bytes(), 0o755)
+         for tool in ("llama-server", "llama-cli", "llama-bench")]
+files += [(config / "llama.env", (source / "llama.env").read_bytes(), 0o644),
+          (unit, (source / "omastrix-llama.service").read_bytes(), 0o644)]
+preset = config / "models.ini"
+if not os.path.lexists(preset):
+    files.append((preset, b"version = 1\n\n[*]\n", 0o644))
+files.append((config / "engine.json", record.encode(), 0o600))
 
+# Prepare every same-directory replacement and backup before publishing anything.
+# Keep backups on the destination filesystem so rollback is also an atomic rename.
+temporaries, backups, staged, published = [], {}, [], []
+rollback_errors = []
+keep_build = source / ".keep-build"
+def temporary(parent):
+    fd, name = tempfile.mkstemp(dir=parent, prefix=".omastrix-publish-")
+    os.close(fd)
+    path = Path(name)
+    temporaries.append(path)
+    return path
+
+def interrupted(signum, frame):
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
+try:
+    for path, data, mode in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if os.path.lexists(path):
+            previous_mode = path.lstat().st_mode
+            if not (stat.S_ISREG(previous_mode) or stat.S_ISLNK(previous_mode)):
+                raise OSError("Unsafe installation destination: " + str(path))
+            backup = temporary(path.parent)
+            backup.unlink()
+            shutil.copy2(path, backup, follow_symlinks=False)
+            backups[path] = backup
+        else:
+            backups[path] = None
+        replacement = temporary(path.parent)
+        replacement.write_bytes(data)
+        replacement.chmod(mode)
+        staged.append((path, replacement))
+    # The shell must not remove a build still referenced after an interrupted or
+    # failed rollback. On a clean rollback this marker is removed below.
+    keep_build.touch()
+    for path, replacement in staged:
+        published.append(path)
+        os.replace(replacement, path)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    # Leave the service stopped and not enabled; never hide a start during reload.
+    state = subprocess.run(["systemctl", "--user", "show", "omastrix-llama.service",
+                            "--property=LoadState", "--property=ActiveState", "--property=SubState"],
+                           check=True, capture_output=True, text=True).stdout
+    values = {}
+    for line in state.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep or key in values:
+            raise RuntimeError("Cannot verify the engine is stopped: malformed service state")
+        values[key] = value
+    if (values.get("LoadState") not in ("loaded", "not-found")
+            or values.get("ActiveState") not in ("inactive", "failed")
+            or values.get("SubState") not in ("dead", "failed")):
+        raise RuntimeError("Cannot verify the engine is stopped; check the user service manager")
+except BaseException as exc:
+    for path in reversed(published):
+        try:
+            if backups[path] is None:
+                path.unlink(missing_ok=True)
+            else:
+                os.replace(backups[path], path)
+        except OSError as rollback_exc:
+            rollback_errors.append(str(path) + ": " + str(rollback_exc))
+    if unit in published:
+        try:
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        except (OSError, subprocess.CalledProcessError) as reload_exc:
+            print("Restored unit on disk, but daemon-reload failed: " + str(reload_exc), file=sys.stderr)
+    if not rollback_errors:
+        keep_build.unlink(missing_ok=True)
+    else:
+        print("Rollback incomplete; retained build and backups: " + "; ".join(rollback_errors), file=sys.stderr)
+    sys.exit("Engine publication failed: " + str(exc))
+finally:
+    if not rollback_errors:
+        for path in temporaries:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                print("Could not remove publication temporary " + str(path) + ": " + str(exc), file=sys.stderr)
+PY
+KEEP_BUILD=1
+
+printf '%s\n' "$DEVICES"
 echo "INSTALL_OK"
-"$BIN/llama-cli" --list-devices

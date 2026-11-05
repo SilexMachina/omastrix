@@ -4,17 +4,108 @@ The copy under ~/.local/share/open-webui and ~/.local/bin/open-webui-serve is a
 hand install. This module does not start it, stop it, or read its secret.
 """
 
+import functools
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
 import time
+import uuid
+
+import library
 
 UNIT = "omastrix-webui.service"
 PORT = 3000
+# Approved product baseline; explicit updates never reset an installed version.
+INITIAL_VERSION = "0.13.0"
+PYTHON_VERSION = "3.11"
+
+# The same guard runs before service launch and inside the generated wrapper.
+ACCESS_GUARD = r'''import os, sqlite3, sys
+from pathlib import Path
+from contextlib import closing
+from urllib.parse import quote
+host = os.environ.get("HOST", "127.0.0.1")
+if host in ("127.0.0.1", "localhost", "::1"):
+    sys.exit(0)
+if os.environ.get("WEBUI_AUTH", "true").lower() != "true":
+    sys.exit("Network access requires authentication.")
+if os.environ.get("DATABASE_URL"):
+    sys.exit("Network access requires a locally verifiable administrator account; custom DATABASE_URL is unsupported.")
+path = Path(os.environ["DATA_DIR"]) / "webui.db"
+if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
+    sys.exit("Cannot verify the administrator account through a redirected database path.")
+try:
+    with closing(sqlite3.connect("file:" + quote(str(path), safe="/") + "?mode=ro", uri=True, timeout=2)) as db:
+        ready = db.execute('SELECT 1 FROM "user" WHERE role = ? LIMIT 1', ("admin",)).fetchone()
+    if not ready:
+        raise ValueError("missing administrator")
+except (sqlite3.Error, ValueError):
+    sys.exit("Create an administrator account on this device before enabling network access.")
+'''
+
+
+
+def safe_path(path, allow_leaf_link=False):
+    """Reject redirection in every ancestor, including HOME and its parents."""
+    path = os.path.abspath(path)
+    current = os.path.sep
+    parts = path.split(os.path.sep)[1:]
+    for index, part in enumerate(parts):
+        current = os.path.join(current, part)
+        leaf = index == len(parts) - 1
+        if os.path.islink(current) and not (leaf and allow_leaf_link):
+            raise ValueError("Open WebUI path contains a symlink: " + current)
+        if not leaf and os.path.lexists(current) and not os.path.isdir(current):
+            raise ValueError("Open WebUI ancestor is not a directory: " + current)
+    return path
+
+
+def safe_layout():
+    for relative in (
+        ".local/state/omastrix/webui.lock", ".local/state/omastrix/webui-install.json",
+        ".local/state/omastrix/webui-update.json", ".local/state/omastrix/webui-check.json",
+        ".local/state/omastrix/webui-install.log", ".local/state/omastrix/webui-update.log",
+        ".local/share/omastrix/webui/venvs", ".config/omastrix/webui.env",
+    ):
+        safe_path(os.path.join(home(), relative))
+    for path in (wrapper_path(), unit_path()):
+        safe_path(path, allow_leaf_link=True)  # Atomic replacement, never dereference.
+
+
+def serialized(*, wait=False, worker=False, job=None):
+    """Check ancestors before library.serialized opens its lock or error state."""
+    def decorate(fn):
+        error_state = (lambda *args, **kwargs: job_path(job)) if job else None
+        locked = library.serialized("webui", wait=wait, worker=worker, error_state=error_state)(fn)
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            try:
+                safe_layout()
+            except (OSError, ValueError) as exc:
+                error = str(exc)
+                if job:
+                    try:
+                        path = safe_path(os.path.join(home(), ".local/state/omastrix/webui-" + job + ".json"))
+                        library.atomic_json(path, {"pid": 0, "error": error})
+                    except (OSError, ValueError) as state_error:
+                        error += "; could not save failure state: " + str(state_error)
+                result = {"success": False, "error": error}
+                if worker:
+                    print(json.dumps(result))
+                    return 1
+                return result
+            return locked(*args, **kwargs)
+        return wrapped
+    return decorate
+
+
+def job_path(job):
+    return os.path.join(state_dir(), "webui-" + job + ".json")
 
 
 def home():
@@ -100,7 +191,7 @@ def version_of(path):
     except (OSError, subprocess.TimeoutExpired):
         return ""
     text = (out.stdout or "").strip()
-    if not text or len(text) > 20 or " " in text:
+    if out.returncode != 0 or version_key(text) is None:
         return ""
     return text
 
@@ -124,8 +215,10 @@ def read_install_state():
 
 
 def write_env():
+    safe_path(env_path())
     os.makedirs(os.path.dirname(env_path()), exist_ok=True)
     if os.path.exists(env_path()):
+        os.chmod(env_path(), 0o600)
         return
     secret = secrets.token_hex(32)
     body = "\n".join([
@@ -136,16 +229,74 @@ def write_env():
         "OPENAI_API_BASE_URLS=http://127.0.0.1:8080/v1",
         "OPENAI_API_KEYS=sk-local",
         "PORT=%s" % PORT,
-        "HOST=0.0.0.0",
+        "HOST=127.0.0.1",
         "WEBUI_AUTH=true",
         "ENABLE_SIGNUP=false",
         "WEBUI_SECRET_KEY=%s" % secret,
-        "DATA_DIR=%s" % os.path.join(prefix(), "data"),
+        "DATA_DIR=%s" % shlex.quote(os.path.join(prefix(), "data")),
         "",
     ])
     fd = os.open(env_path(), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(body)
+
+
+def access_config():
+    values = {"HOST": "127.0.0.1", "DATA_DIR": os.path.join(prefix(), "data"), "WEBUI_AUTH": "true"}
+    if not os.path.exists(env_path()):
+        return values
+    safe_path(env_path())
+    seen = set()
+    with open(env_path()) as fh:
+        for line in fh:
+            tokens = shlex.split(line, comments=True)
+            if tokens and tokens[0] == "export":
+                tokens = tokens[1:]
+            for token in tokens:
+                key, sep, value = token.partition("=")
+                if sep and key in ("HOST", "DATA_DIR", "WEBUI_AUTH", "DATABASE_URL"):
+                    if key in seen or any(c in value for c in ("$", "`", "\n", "\r")):
+                        raise ValueError("Ambiguous Open WebUI access configuration: " + key)
+                    seen.add(key)
+                    values[key] = value
+    return values
+
+
+def access_settings():
+    config = access_config()
+    local = config["HOST"] in ("127.0.0.1", "localhost", "::1")
+    return {"access": "local" if local else "network", "bind_host": config["HOST"]}
+
+
+def check_network_access(config):
+    result = subprocess.run([sys.executable, "-c", ACCESS_GUARD],
+                            env=config, capture_output=True, text=True, timeout=5, check=False)
+    if result.returncode:
+        raise ValueError((result.stderr or "Could not verify Open WebUI network access.").strip())
+
+
+@serialized()
+def set_access(mode, confirm=False):
+    if mode not in ("local", "network"):
+        return {"success": False, "error": "Access must be local or network."}
+    require_stopped()
+    if not os.path.isfile(env_path()):
+        return {"success": False, "error": "Install Open WebUI first."}
+    config = access_config()
+    host = "127.0.0.1" if mode == "local" else "0.0.0.0"
+    if mode == "network":
+        check_network_access(dict(config, HOST=host))
+        if not confirm:
+            return {"success": False, "needs_confirm": True,
+                    "error": "Listen on all network interfaces on port 3000? Restrict access to trusted devices; this connection has no TLS."}
+    with open(env_path()) as fh:
+        body = fh.read()
+    body, count = re.subn(r"(?m)^[ \t]*(?:export[ \t]+)?HOST=.*$", "HOST=" + host, body)
+    if not count:
+        body = body.rstrip("\n") + "\nHOST=" + host + "\n"
+    write_wrapper()
+    library.atomic_text(env_path(), body, 0o600)
+    return {"success": True, "access": mode}
 
 
 def write_wrapper():
@@ -155,12 +306,14 @@ set -eu
 set -a
 . "${HOME}/.config/omastrix/webui.env"
 set +a
+export WEBUI_AUTH=true
+export ENABLE_SIGNUP=false
+python3 - << 'OMASTRIX_ACCESS_CHECK'
+""" + ACCESS_GUARD + """OMASTRIX_ACCESS_CHECK
 mkdir -p "$DATA_DIR"
 exec "${HOME}/.local/share/omastrix/webui/venv/bin/open-webui" serve --host "$HOST" --port "$PORT"
 """
-    with open(wrapper_path(), "w") as fh:
-        fh.write(text)
-    os.chmod(wrapper_path(), 0o755)
+    library.atomic_text(wrapper_path(), text, 0o755)
 
 
 def write_unit():
@@ -179,9 +332,10 @@ StandardError=append:%h/.local/state/omastrix/webui.log
 [Install]
 WantedBy=default.target
 """
-    with open(unit_path(), "w") as fh:
-        fh.write(text)
-    systemctl("daemon-reload")
+    library.atomic_text(unit_path(), text)
+    code, error = systemctl("daemon-reload")
+    if code != 0:
+        raise OSError(error or "Could not reload Open WebUI service configuration")
 
 
 def ensure_layout():
@@ -191,20 +345,24 @@ def ensure_layout():
 
 
 def status():
-    installed = os.access(webui_bin(), os.X_OK)
+    try:
+        safe_layout()
+        installed = current_venv() is not None
+        access = access_settings()
+    except (OSError, ValueError) as exc:
+        return {"installed": False, "running": False, "state": "unavailable", "version": "",
+                "latest_version": "", "update_available": False, "updating": False,
+                "url": "http://127.0.0.1:3000", "error": str(exc)}
     install = read_install_state()
     active, active_text = systemctl("is-active", UNIT)
-    running = active_text == "active" or (installed and port_open() and active_text == "active")
-    if active_text == "active":
-        state = "running"
-    elif install.get("running"):
+    state = library.service_state(active, active_text)
+    if install.get("running") and state in ("stopped", "failed"):
         state = "installing"
-    elif installed:
-        state = "stopped"
-    else:
+    elif not installed and state in ("stopped", "failed"):
         state = "not_installed"
     version = version_of(webui_bin()) if installed else ""
     return {
+        **access,
         "installed": installed,
         "running": state == "running",
         "state": state,
@@ -217,6 +375,7 @@ def status():
     }
 
 
+@serialized()
 def start():
     if not os.access(webui_bin(), os.X_OK):
         return {"success": False, "error": "Open WebUI is not installed."}
@@ -225,6 +384,7 @@ def start():
         if active_text != "active":
             return {"success": False, "error": "Port 3000 is already in use."}
         return {"success": True, "message": "Open WebUI is already running."}
+    check_network_access(access_config())
     ensure_layout()
     code, text = systemctl("start", UNIT)
     if code != 0:
@@ -252,63 +412,220 @@ def stop():
     return {"success": True, "message": "Open WebUI is stopped."}
 
 
-def install():
-    if os.access(webui_bin(), os.X_OK):
+def current_venv():
+    pointer = os.path.join(prefix(), "venv")
+    if not os.path.lexists(pointer):
+        return None
+    managed = os.path.islink(pointer)
+    if managed:
+        relative = os.readlink(pointer)
+        if not re.fullmatch(r"venvs/[a-f0-9]{32}", relative):
+            raise ValueError("Foreign Open WebUI venv pointer; refusing to use it.")
+        venv = safe_path(os.path.join(prefix(), relative))
+    else:
+        venv = safe_path(pointer)
+    for relative in ("pyvenv.cfg", "bin", "bin/open-webui", ".omastrix.json"):
+        safe_path(os.path.join(venv, relative))
+    if not os.path.isfile(os.path.join(venv, "pyvenv.cfg")) or not os.access(os.path.join(venv, "bin/open-webui"), os.X_OK):
+        raise ValueError("Incomplete or foreign Open WebUI venv layout.")
+    metadata_path = os.path.join(venv, ".omastrix.json")
+    metadata = None
+    if managed or os.path.lexists(metadata_path):
+        with open(metadata_path) as fh:
+            metadata = json.load(fh)
+        if (not isinstance(metadata, dict) or set(metadata) != {"schema", "version", "python"}
+                or type(metadata["schema"]) is not int or metadata["schema"] != 1
+                or metadata["python"] != PYTHON_VERSION or version_key(metadata["version"]) is None):
+            raise ValueError("Malformed Open WebUI venv metadata.")
+    actual = version_of(os.path.join(venv, "bin/open-webui"))
+    if version_key(actual) is None or (metadata and metadata["version"] != actual):
+        raise ValueError("Open WebUI venv metadata/distribution version mismatch.")
+    return venv
+
+
+def require_stopped():
+    code, text = systemctl("is-active", UNIT)
+    if library.service_state(code, text) not in ("stopped", "failed"):
+        raise ValueError("Stop Open WebUI before installation or updating; service state must be known stopped.")
+
+
+def promote(venv, version, job_path, update=False):
+    """Rollback executables/config on publication failure, never database contents."""
+    safe_layout()
+    current_venv()  # Recheck foreign pointers/metadata after the long build.
+    pointer = os.path.join(prefix(), "venv")
+    old = os.readlink(pointer) if os.path.islink(pointer) else None
+    snapshots = {}
+    for path in (env_path(), wrapper_path(), unit_path(), check_path()):
+        if os.path.exists(path):
+            with open(path, "rb") as fh:
+                snapshots[path] = (fh.read(), os.stat(path).st_mode & 0o777)
+        else:
+            snapshots[path] = None
+    switched = False
+    legacy = None
+    legacy_metadata_added = False
+    try:
+        require_stopped()
         ensure_layout()
+        if os.path.isdir(pointer) and not os.path.islink(pointer):
+            # Preserve the old directory for rollback. No pip changes to its files.
+            legacy = os.path.join(prefix(), "venvs", uuid.uuid4().hex)
+            os.makedirs(os.path.dirname(legacy), exist_ok=True)
+            metadata = os.path.join(pointer, ".omastrix.json")
+            if not os.path.exists(metadata):
+                library.atomic_json(metadata, {"schema": 1, "version": version_of(webui_bin()), "python": PYTHON_VERSION})
+                legacy_metadata_added = True
+        require_stopped()  # Immediately before migration/atomic pointer replacement.
+        if legacy is not None:
+            os.rename(pointer, legacy)
+            if venv == pointer:
+                venv = legacy
+        switch_pointer(venv)
+        switched = True
+        if update:
+            library.atomic_json(check_path(), {"latest": version})
+        library.atomic_json(job_path, {"pid": 0, "error": "", "version": version})
+    except BaseException as exc:
+        failures = []
+        if legacy is not None:
+            try:
+                if os.path.isdir(legacy):
+                    if os.path.islink(pointer):
+                        os.unlink(pointer)
+                    os.rename(legacy, pointer)
+                if legacy_metadata_added:
+                    os.unlink(os.path.join(pointer, ".omastrix.json"))
+            except OSError as rollback:
+                failures.append(str(rollback))
+        elif switched:
+            try:
+                if old is None:
+                    os.unlink(pointer)
+                else:
+                    switch_pointer(os.path.join(prefix(), old))
+            except OSError as rollback:
+                failures.append(str(rollback))
+        for path, snapshot in snapshots.items():
+            try:
+                if snapshot is None:
+                    if os.path.lexists(path):
+                        os.unlink(path)
+                else:
+                    body, mode = snapshot
+                    temporary = path + ".rollback-" + uuid.uuid4().hex
+                    try:
+                        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+                        with os.fdopen(fd, "wb") as fh:
+                            fh.write(body)
+                        os.replace(temporary, path)
+                    finally:
+                        if os.path.lexists(temporary):
+                            os.unlink(temporary)
+            except OSError as rollback:
+                failures.append(str(rollback))
+        code, text = systemctl("daemon-reload")
+        if code:
+            failures.append("restored files but daemon-reload failed: " + text)
+        if failures:
+            raise OSError(str(exc) + "; rollback incomplete: " + "; ".join(failures)) from exc
+        raise
+
+
+def switch_pointer(venv):
+    temporary = os.path.join(prefix(), ".venv-" + uuid.uuid4().hex)
+    try:
+        os.symlink(os.path.relpath(venv, prefix()), temporary)
+        os.replace(temporary, os.path.join(prefix(), "venv"))
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+
+
+def build_venv(uv, version, logfile):
+    # Build at its permanent unique path: venv entry-point shebangs are absolute.
+    venv = os.path.join(prefix(), "venvs", uuid.uuid4().hex)
+    os.makedirs(os.path.dirname(venv), exist_ok=True)
+    py = os.path.join(venv, "bin/python")
+    steps = [
+        [uv, "venv", venv, "--python", PYTHON_VERSION],
+        [uv, "pip", "install", "--python", py, "open-webui==%s" % version],
+        [uv, "pip", "check", "--python", py],
+    ]
+    try:
+        with open(os.path.join(state_dir(), logfile), "ab") as log:
+            for cmd in steps:
+                if subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False).returncode:
+                    raise ValueError("Open WebUI build or dependency check failed. See " + logfile)
+        probed = subprocess.run([py, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                                capture_output=True, text=True, timeout=15, check=False)
+        if probed.returncode or (probed.stdout or "").strip() != PYTHON_VERSION:
+            raise ValueError("Open WebUI build did not use Python " + PYTHON_VERSION)
+        binary = safe_path(os.path.join(venv, "bin/open-webui"))
+        if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+            raise ValueError("Open WebUI build is missing its executable.")
+        if version_of(binary) != version:
+            raise ValueError("Installed Open WebUI distribution version does not match " + version)
+        library.atomic_json(os.path.join(venv, ".omastrix.json"),
+                            {"schema": 1, "version": version, "python": PYTHON_VERSION})
+        return venv
+    except BaseException:
+        if os.path.isdir(venv):
+            shutil.rmtree(venv)
+        raise
+
+
+@serialized(wait=True, worker=True, job="install")
+def install():
+    existing = current_venv()
+    require_stopped()
+    version = version_of(webui_bin()) if existing else INITIAL_VERSION
+    legacy = os.path.isdir(os.path.join(prefix(), "venv")) and not os.path.islink(os.path.join(prefix(), "venv"))
+    if existing and not legacy:
+        promote(existing, version, install_state_path())
         print(json.dumps({"success": True, "message": "Open WebUI is already installed."}))
         return 0
     uv = find_uv()
     if not uv:
-        print(json.dumps({
-            "success": False,
-            "error": "Open WebUI needs Python 3.11 or 3.12. This system Python is too new, and uv is not installed.",
-        }))
-        return 1
-    os.makedirs(prefix(), exist_ok=True)
-    os.makedirs(state_dir(), exist_ok=True)
-    log = open(os.path.join(state_dir(), "webui-install.log"), "ab")
-    venv = os.path.join(prefix(), "venv")
-    steps = [
-        [uv, "venv", venv, "--python", "3.11"],
-        [uv, "pip", "install", "--python", os.path.join(venv, "bin/python"), "open-webui"],
-    ]
-    for cmd in steps:
-        proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False)
-        if proc.returncode != 0:
-            with open(install_state_path(), "w") as fh:
-                json.dump({"pid": 0, "error": "Install failed. See ~/.local/state/omastrix/webui-install.log"}, fh)
-            print(json.dumps({"success": False, "error": "Open WebUI install failed."}))
-            return 1
-    ensure_layout()
-    with open(install_state_path(), "w") as fh:
-        json.dump({"pid": 0, "error": ""}, fh)
-    print(json.dumps({"success": True, "message": "Open WebUI is installed. It is not started."}))
+        raise ValueError("Open WebUI installation requires uv.")
+    # A legacy venv cannot be relocated and reused: entry-point shebangs and
+    # activation scripts contain its absolute original path. Rebuild the SAME
+    # distribution version, verify dependencies, then preserve the old tree only
+    # as rollback material. Never downgrade an existing legacy installation.
+    venv = build_venv(uv, version, "webui-install.log")
+    promote(venv, version, install_state_path())
+    print(json.dumps({"success": True, "message": "Open WebUI installed."}))
     return 0
 
 
+@serialized(job="install")
 def start_install():
-    if os.access(webui_bin(), os.X_OK):
-        ensure_layout()
-        return {"success": True, "message": "Open WebUI is already installed."}
+    existing = current_venv()
+    pointer = os.path.join(prefix(), "venv")
+    if existing:
+        require_stopped()
+        if os.path.islink(pointer):
+            promote(existing, version_of(webui_bin()), install_state_path())
+            return {"success": True, "message": "Open WebUI is already installed."}
+        # A legacy directory needs a checked rebuild in the install worker.
     state = read_install_state()
     if state.get("running"):
         return {"success": True, "message": "Open WebUI install is already running."}
     if not find_uv():
         return {
             "success": False,
-            "error": "Open WebUI needs Python 3.11 or 3.12. This system Python is too new, and uv is not installed.",
+            "error": "Open WebUI installation requires uv.",
         }
-    log = open(os.path.join(state_dir(), "webui-install.log"), "ab")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proc = subprocess.Popen(
-        [os.path.join(root, "bin/omastrix"), "webui-install-run"],
-        start_new_session=True,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
-    with open(install_state_path(), "w") as fh:
-        json.dump({"pid": proc.pid, "error": ""}, fh)
-    return {"success": True, "message": "Installing Open WebUI into the user profile. It will not start."}
+    with open(os.path.join(state_dir(), "webui-install.log"), "ab") as log:
+        proc = subprocess.Popen(
+            [os.path.join(root, "bin/omastrix"), "webui-install-run"],
+            start_new_session=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    library.atomic_json(install_state_path(), {'pid': proc.pid, 'error': ''})
+    return {"success": True, "message": "Installing Open WebUI."}
 
 
 def check_path():
@@ -342,7 +659,7 @@ def read_update_state():
 
 
 def version_key(text):
-    if not text or not re.fullmatch(r"\d+(?:\.\d+)+", text):
+    if not isinstance(text, str) or len(text) > 40 or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", text):
         return None
     return tuple(int(part) for part in text.split("."))
 
@@ -418,8 +735,7 @@ def check():
         return {"success": False, "error": err}
     current = version_of(webui_bin())
     os.makedirs(state_dir(), exist_ok=True)
-    with open(check_path(), "w") as fh:
-        json.dump({"latest": latest}, fh)
+    library.atomic_json(check_path(), {'latest': latest})
     latest_key = version_key(latest)
     current_key = version_key(current)
     newer = bool(latest_key and current_key and latest_key > current_key)
@@ -436,11 +752,12 @@ def check():
     }
 
 
+@serialized()
 def start_update():
-    if status().get("running"):
+    if status().get("state") not in ("stopped", "failed"):
         return {
             "success": False,
-            "error": "Stop Open WebUI before updating. The program that is running would be replaced.",
+            "error": "Stop Open WebUI before updating.",
         }
     state = read_update_state()
     if state.get("running"):
@@ -456,37 +773,32 @@ def start_update():
     if not find_uv():
         return {"success": False, "error": "Open WebUI update needs uv, and uv is not installed."}
     os.makedirs(state_dir(), exist_ok=True)
-    log = open(os.path.join(state_dir(), "webui-update.log"), "ab")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proc = subprocess.Popen(
-        [os.path.join(root, "bin/omastrix"), "webui-update-run", latest],
-        start_new_session=True,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
-    with open(update_state_path(), "w") as fh:
-        json.dump({"pid": proc.pid, "error": "", "version": latest}, fh)
-    return {"success": True, "message": "Updating Open WebUI to %s. It will not start." % latest}
+    with open(os.path.join(state_dir(), "webui-update.log"), "ab") as log:
+        proc = subprocess.Popen(
+            [os.path.join(root, "bin/omastrix"), "webui-update-run", latest],
+            start_new_session=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    library.atomic_json(update_state_path(), {'pid': proc.pid, 'error': '', 'version': latest})
+    return {"success": True, "message": "Updating Open WebUI to %s." % latest}
 
 
+@serialized(wait=True, worker=True, job="update")
 def update_run(version):
     if version_key(version) is None:
-        print("Open WebUI update needs a version", file=sys.stderr)
-        return 2
+        raise ValueError("Open WebUI update needs a stable exact version")
+    code, active = systemctl("is-active", UNIT)
+    if library.service_state(code, active) not in ("stopped", "failed"):
+        library.atomic_json(update_state_path(), {'pid': 0, 'error': 'Stop Open WebUI before updating.'})
+        return 1
+    current_venv()
     uv = find_uv()
     py = venv_python()
     if not uv or not os.access(py, os.X_OK):
-        with open(update_state_path(), "w") as fh:
-            json.dump({"pid": 0, "error": "Open WebUI update could not find its Python."}, fh)
+        library.atomic_json(update_state_path(), {'pid': 0, 'error': 'Open WebUI update could not find its Python.'})
         return 1
-    code = subprocess.call([uv, "pip", "install", "--python", py, "open-webui==%s" % version])
-    if code != 0:
-        with open(update_state_path(), "w") as fh:
-            json.dump({"pid": 0, "error": "Update failed. See ~/.local/state/omastrix/webui-update.log"}, fh)
-        return 1
-    ensure_layout()
-    with open(update_state_path(), "w") as fh:
-        json.dump({"pid": 0, "error": "", "version": version}, fh)
-    with open(check_path(), "w") as fh:
-        json.dump({"latest": version}, fh)
+    venv = build_venv(uv, version, "webui-update.log")
+    promote(venv, version, update_state_path(), update=True)
     return 0

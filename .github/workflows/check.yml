@@ -1,0 +1,45 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare isolated temporary directory
+        run: mkdir -p "$RUNNER_TEMP/omastrix-tests"
+      - name: Offline Python and Node presentation tests
+        env:
+          TMPDIR: ${{ runner.temp }}/omastrix-tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Release metadata
+        run: python3 tools/release.py check
+      - name: Python and installer syntax
+        run: |
+          python3 -m compileall -q bin tools tests
+          python3 -m py_compile bin/omastrix
+          bash -n bin/omastrix-engine-install
+      - name: Whitespace
+        run: |
+          git show --format= --check HEAD
+          git diff --check

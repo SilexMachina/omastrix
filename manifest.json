@@ -2,20 +2,30 @@
   "schemaVersion": 1,
   "id": "silexmachina.omastrix",
   "name": "OmaStrix",
-  "version": "0.3.0",
+  "version": "0.5.0-preview.1",
   "author": "SilentD",
   "license": "MIT",
-  "description": "Strix Halo local models for Omarchy. GTT, strix-llama.cpp, Open WebUI, and a curated model table. Download does not load.",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "Panel.qml" },
+  "description": "Manage local AI on Strix Halo: models, GPU memory, strix-llama.cpp, and Open WebUI.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
   "barWidget": {
     "displayName": "OmaStrix",
-    "description": "Local AI for Strix Halo. Engine, GTT, Open WebUI, and the model table.",
+    "description": "Local AI for Strix Halo",
     "category": "AI",
-    "aliases": ["omastrix", "gtt", "strix"],
+    "aliases": [
+      "omastrix",
+      "gtt",
+      "strix"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
-    "defaults": { "refreshIntervalSec": 5 },
+    "defaults": {
+      "refreshIntervalSec": 5
+    },
     "schema": [
       {
         "key": "refreshIntervalSec",

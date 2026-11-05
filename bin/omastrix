@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """OmaStrix host snapshot. Local sysfs only. Prints one JSON object."""
 
+import fcntl
 import glob
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import library
@@ -104,18 +106,55 @@ def file_bodies(label):
     return limine, modprobe
 
 
+def replace_file(path, body, mode):
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as fh:
+            tmp = fh.name
+            fh.write(body)
+            os.fchmod(fh.fileno(), mode)
+        os.replace(tmp, path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def write_gtt(label):
     limine, modprobe = file_bodies(label)
-    for path, body in ((LIMINE_CONF, limine), (MODPROBE_CONF, modprobe)):
-        tmp = path + ".omastrix-tmp"
-        with open(tmp, "w") as fh:
-            fh.write(body)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    built = subprocess.run(["limine-mkinitcpio"], capture_output=True, text=True)
-    if built.returncode != 0:
-        err = (built.stderr or built.stdout or "limine-mkinitcpio failed").strip()
-        print(json.dumps({"success": False, "error": err}))
+    original = {}
+    changed = []
+    try:
+        for path in (LIMINE_CONF, MODPROBE_CONF):
+            if os.path.islink(path):
+                raise ValueError("GTT configuration must not be a symlink")
+            try:
+                with open(path, "rb") as fh:
+                    original[path] = (fh.read(), os.fstat(fh.fileno()).st_mode & 0o777)
+            except FileNotFoundError:
+                original[path] = None
+        for path, body in ((LIMINE_CONF, limine), (MODPROBE_CONF, modprobe)):
+            replace_file(path, body.encode(), 0o644)
+            changed.append(path)
+        built = subprocess.run(["limine-mkinitcpio"], capture_output=True, text=True)
+        if built.returncode != 0:
+            raise OSError((built.stderr or built.stdout or "limine-mkinitcpio failed").strip())
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        failures = []
+        for path in reversed(changed):
+            try:
+                previous = original[path]
+                if previous is None:
+                    os.unlink(path)
+                else:
+                    replace_file(path, *previous)
+            except OSError as restore_error:
+                failures.append("%s: %s" % (path, restore_error))
+        error = "GTT change failed: %s" % exc
+        if failures:
+            error += ". Restore failed: " + "; ".join(failures)
+        elif changed:
+            error += ". Previous configuration restored; rebuild boot images before rebooting."
+        print(json.dumps({"success": False, "error": error}))
         return 1
     print(json.dumps({"success": True, "gtt_set": label, "pending": True}))
     return 0
@@ -177,6 +216,13 @@ def is_strix_halo(pci, name):
     return "1002:1586" in blob.replace("0x", "")
 
 
+def supported_gtt_choices(strix_halo, mem_bytes):
+    if not strix_halo or not mem_bytes:
+        return []
+    return [label for label in GTT_CHOICES
+            if (int(label) + library.RESERVE_GIB) * 1024**3 <= mem_bytes]
+
+
 def pill(used, total, default):
     if used is None or total is None:
         return "GTT ?"
@@ -184,8 +230,9 @@ def pill(used, total, default):
     return "%d/%dG%s" % (round(used), round(total), mark)
 
 
-def snapshot():
-    device = gpu_devices()[0] if gpu_devices() else ""
+def host_probe():
+    devices = gpu_devices()
+    device = devices[0] if devices else ""
     uevent = {}
     if device:
         for line in read_text(os.path.join(device, "uevent")).splitlines():
@@ -195,6 +242,13 @@ def snapshot():
     pci = (uevent.get("PCI_ID") or "").lower()
     slot = uevent.get("PCI_SLOT_NAME") or ""
     name = lspci_name(slot)
+    halo = bool(device) and uevent.get("DRIVER") == "amdgpu" and is_strix_halo(pci, name)
+    return device, uevent, pci, slot, name, halo
+
+
+def snapshot():
+    device, uevent, pci, slot, name, halo = host_probe()
+    mem_bytes = mem_total_bytes()
     gtt_total = read_int(os.path.join(device, "mem_info_gtt_total")) if device else None
     gtt_used = read_int(os.path.join(device, "mem_info_gtt_used")) if device else None
     limit = pages_limit()
@@ -210,7 +264,7 @@ def snapshot():
     default = limit is None or limit <= STOCK_PAGES_LIMIT
     used_g = gib(gtt_used)
     total_g = gib(gtt_total)
-    halo = bool(device) and is_strix_halo(pci, name)
+
     pending = bool(choice) and choice != live_choice
     lib = library.library_view(total_g)
     library.write_preset(total_g)
@@ -230,8 +284,11 @@ def snapshot():
         "gtt_set": choice,
         "gtt_live": live_choice,
         "gtt_pending": pending,
+        "supported_gtt": supported_gtt_choices(halo, mem_bytes),
+        "gtt_choices": supported_gtt_choices(halo, mem_bytes),
+        "app_version": read_json(os.path.join(library.root_dir(), "manifest.json")).get("version") or "",
         "pages_limit": limit,
-        "mem_total_gib": gib(mem_total_bytes()),
+        "mem_total_gib": gib(mem_bytes),
         "pill": pill_text,
         "vertical": "GTT" if halo else "?",
         "engine": engine_info(),
@@ -263,22 +320,28 @@ def engine_paths():
 def read_json(path):
     try:
         with open(path) as fh:
-            return json.load(fh)
-    except (OSError, json.JSONDecodeError):
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
         return {}
 
 
+def text_field(data, key):
+    value = data.get(key)
+    return value if isinstance(value, str) else ""
+
+
 def build_number(version):
-    match = re.search(r"build (\d+)", version or "")
+    match = re.search(r"build (\d+)", version) if isinstance(version, str) else None
     return int(match.group(1)) if match else 0
 
 
 def pid_alive(pid):
-    if not isinstance(pid, int) or pid <= 0:
+    if type(pid) is not int or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except (OSError, OverflowError):
         return False
     return True
 
@@ -290,6 +353,8 @@ def newest_halo_tag():
             capture_output=True, text=True, timeout=25, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if remote.returncode != 0:
         return None
     best = None
     for line in (remote.stdout or "").splitlines():
@@ -329,62 +394,51 @@ def port_open():
 
 def engine_info():
     paths = engine_paths()
-    record = {}
-    if os.path.exists(paths["record"]):
-        try:
-            with open(paths["record"]) as fh:
-                record = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            record = {}
-    pin = {}
-    if os.path.exists(paths["pin"]):
-        try:
-            with open(paths["pin"]) as fh:
-                pin = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            pin = {}
+    record = read_json(paths["record"])
+    pin = read_json(paths["pin"])
     installed = os.path.isfile(paths["bin"]) and os.access(paths["bin"], os.X_OK)
     active, active_text = systemctl("is-active", paths["unit"])
     enabled, enabled_text = systemctl("is-enabled", paths["unit"])
-    state = active_text or "inactive"
-    if state == "active":
-        state = "running"
-    elif state == "activating":
-        state = "starting"
-    elif state == "failed":
-        state = "failed"
-    else:
-        state = "stopped"
+    state = library.service_state(active, active_text)
     listening = port_open()
     check = read_json(paths["check"])
     updating = read_json(paths["update"])
     build = build_number(record.get("version") or "")
-    latest_build = int(check.get("latest_build") or 0)
+    latest_build = check.get("latest_build")
+    if type(latest_build) is not int or latest_build < 0:
+        latest_build = 0
     is_updating = pid_alive(updating.get("pid"))
     return {
         "installed": installed,
-        "version": record.get("version") or "",
+        "hardware_supported": host_probe()[-1],
+        "version": text_field(record, "version"),
         "build": build,
-        "commit": record.get("commit") or "",
-        "pin": pin.get("commit") or "",
+        "commit": text_field(record, "commit"),
+        "pin": text_field(pin, "commit"),
         "state": state if installed else "not_installed",
         "autostart": enabled_text == "enabled",
         "listening": listening,
         "ui": paths["ui"],
         "latest_build": latest_build,
-        "latest_tag": check.get("latest_tag") or "",
+        "latest_tag": text_field(check, "latest_tag"),
         "update_available": bool(latest_build and build and latest_build > build and not is_updating),
         "updating": is_updating,
-        "update_error": "" if is_updating else (updating.get("error") or ""),
+        "update_error": "" if is_updating else text_field(updating, "error"),
     }
+
+
+@library.serialized("engine")
+def start_engine():
+    if not host_probe()[-1]:
+        return {"success": False, "error": "Engine start requires an amdgpu Strix Halo host; unsupported hardware is install-only preview."}
+    code, text = systemctl("start", engine_paths()["unit"])
+    return {"success": code == 0, "error": "" if code == 0 else text}
 
 
 def engine_action(verb, arg):
     paths = engine_paths()
     if verb == "engine-start":
-        code, text = systemctl("start", paths["unit"])
-        print(json.dumps({"success": code == 0, "error": "" if code == 0 else text}))
-        return 0 if code == 0 else 1
+        return emit_result(start_engine())
     if verb == "engine-stop":
         code, text = systemctl("stop", paths["unit"])
         print(json.dumps({"success": code == 0, "error": "" if code == 0 else text}))
@@ -404,11 +458,10 @@ def engine_action(verb, arg):
             info["success"] = False
             info["error"] = "Could not check for a newer strix-llama.cpp build."
             print(json.dumps(info))
-            return 0
+            return 1
         number, name, commit = latest
         os.makedirs(os.path.dirname(engine_paths()["check"]), exist_ok=True)
-        with open(engine_paths()["check"], "w") as fh:
-            json.dump({"latest_tag": name, "latest_build": number, "latest_commit": commit}, fh)
+        library.atomic_json(engine_paths()['check'], {'latest_tag': name, 'latest_build': number, 'latest_commit': commit})
         info["latest_tag"] = name
         info["latest_build"] = number
         info["build"] = installed
@@ -422,21 +475,49 @@ def engine_action(verb, arg):
             info["message"] = "strix-llama.cpp is the newest published build, %s." % installed
         print(json.dumps(info))
         return 0
+    if verb == "engine-install":
+        result = start_engine_install()
+        print(json.dumps(result))
+        return 0 if result.get("success") is True else 1
+    if verb == "engine-install-run":
+        return engine_update_run(read_json(paths["pin"]).get("commit") or "", first_install=True)
     if verb == "engine-update":
-        print(json.dumps(start_engine_update()))
-        return 0
+        return emit_result(start_engine_update())
     if verb == "engine-update-run":
         return engine_update_run(arg)
     print("unknown verb: %s" % verb, file=sys.stderr)
     return 2
 
 
+@library.serialized("engine", error_state=lambda: engine_paths()["update"])
+def start_engine_install():
+    info = engine_info()
+    if info.get("installed"):
+        return {"success": True, "message": "strix-llama.cpp is already installed."}
+    paths = engine_paths()
+    if any(os.path.lexists(paths[key]) for key in ("record", "bin")):
+        return {"success": False, "error": "Existing engine files found; first install cannot replace or repair them."}
+    if info.get("state") in ("running", "starting"):
+        return {"success": False, "error": "Stop strix-llama.cpp before installing."}
+    if pid_alive(read_json(paths["update"]).get("pid")):
+        return {"success": True, "message": "Engine installation is already running."}
+    os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
+    with open(paths["update_log"], "ab") as log:
+        proc = subprocess.Popen(
+            [os.path.abspath(__file__), "engine-install-run"],
+            start_new_session=True, stdout=log, stderr=subprocess.STDOUT,
+        )
+    library.atomic_json(paths['update'], {'pid': proc.pid, 'error': ''})
+    return {"success": True, "message": "Installing strix-llama.cpp."}
+
+
+@library.serialized("engine", error_state=lambda: engine_paths()["update"])
 def start_engine_update():
     info = engine_info()
-    if info.get("state") == "running":
+    if info.get("state") not in ("stopped", "failed"):
         return {
             "success": False,
-            "error": "Stop strix-llama.cpp before updating. The program that is running would be replaced.",
+            "error": "Stop strix-llama.cpp before updating.",
         }
     paths = engine_paths()
     updating = read_json(paths["update"])
@@ -450,38 +531,82 @@ def start_engine_update():
     if installed and number <= installed:
         return {"success": True, "message": "strix-llama.cpp is already the newest published build, %s." % installed}
     os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
-    log = open(paths["update_log"], "ab")
-    proc = subprocess.Popen(
-        [os.path.abspath(__file__), "engine-update-run", commit],
-        start_new_session=True,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
-    with open(paths["update"], "w") as fh:
-        json.dump({"pid": proc.pid, "error": "", "build": number, "commit": commit}, fh)
+    with open(paths["update_log"], "ab") as log:
+        proc = subprocess.Popen(
+            [os.path.abspath(__file__), "engine-update-run", commit],
+            start_new_session=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    library.atomic_json(paths['update'], {'pid': proc.pid, 'error': '', 'build': number, 'commit': commit})
     return {
         "success": True,
-        "message": "Updating strix-llama.cpp to build %s. It will not start." % number,
+        "message": "Updating strix-llama.cpp to build %s." % number,
     }
 
 
-def engine_update_run(commit):
+def engine_update_run(commit, first_install=False):
+    # Own the descriptor so the installer can inherit the same flock instead of
+    # reopening (and contending with) its parent's engine lock.
+    paths = engine_paths()
+    try:
+        lock_path = os.path.join(os.path.dirname(paths["update"]), "engine.lock")
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return engine_update_locked(commit, first_install, lock.fileno())
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        error = str(exc)
+        try:
+            library.atomic_json(paths["update"], {"pid": 0, "error": error})
+        except (OSError, ValueError) as state_error:
+            error += "; could not save failure state: " + str(state_error)
+        print(json.dumps({"success": False, "error": error}))
+        return 1
+
+
+def engine_update_locked(commit, first_install, lock_fd):
     if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
         print("engine update needs a commit", file=sys.stderr)
         return 2
     paths = engine_paths()
     os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
-    code = subprocess.call([paths["installer"], commit])
-    with open(paths["update"], "w") as fh:
-        if code == 0:
-            json.dump({"pid": 0, "error": "", "commit": commit}, fh)
-        else:
-            json.dump({
-                "pid": 0,
-                "error": "Update failed. See ~/.local/state/omastrix/engine-update.log",
-                "commit": commit,
-            }, fh)
+    if first_install and any(os.path.lexists(paths[key]) for key in ("record", "bin")):
+        library.atomic_json(paths["update"], {"pid": 0, "error": "Existing engine files found; first install cannot replace or repair them."})
+        return 1
+    code, state = systemctl("is-active", paths["unit"])
+    missing_unit = False
+    if first_install and code == 4 and state in ("inactive", "unknown"):
+        probe_code, properties = systemctl("show", paths["unit"], "--property=LoadState", "--property=ActiveState")
+        missing_unit = probe_code == 0 and sorted(properties.splitlines()) == [
+            "ActiveState=inactive", "LoadState=not-found"]
+    if library.service_state(code, state) not in ("stopped", "failed") and not missing_unit:
+        library.atomic_json(paths['update'], {'pid': 0, 'error': 'Stop strix-llama.cpp before installing or updating.'})
+        return 1
+    # Public-source builds need process/session paths, not application credentials
+    # or arbitrary agent variables. Keep only the installer's supported inputs.
+    environment_keys = (
+        "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+        "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "OMASTRIX_RADV_ICD",
+        "CMAKE_BUILD_PARALLEL_LEVEL", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    )
+    environment = {key: os.environ[key] for key in environment_keys if key in os.environ}
+    environment["OMASTRIX_ENGINE_LOCK_FD"] = str(lock_fd)
+    code = subprocess.call(
+        [paths["installer"]] + ([] if first_install else [commit]),
+        pass_fds=(lock_fd,), env=environment,
+    )
+    library.atomic_json(paths["update"], {
+        "pid": 0,
+        "error": "" if code == 0 else "Engine installation failed. See ~/.local/state/omastrix/engine-update.log",
+        "commit": commit,
+    })
     return 0 if code == 0 else 1
+
+
+def emit_result(result):
+    print(json.dumps(result))
+    return 0 if result.get("success") is True else 1
 
 
 def main():
@@ -498,52 +623,50 @@ def main():
             limine, modprobe = file_bodies(label)
             print(json.dumps({"limine": limine, "modprobe": modprobe}))
             return 0
+        halo = host_probe()[-1]
+        if label not in supported_gtt_choices(halo, mem_total_bytes()):
+            print(json.dumps({"success": False, "error": "GTT choice is unsupported: Strix Halo and 14 GiB desktop reserve required."}))
+            return 1
         if os.geteuid() != 0:
             os.execvp("pkexec", ["pkexec", os.path.abspath(__file__), "set-gtt", label])
         return write_gtt(label)
-    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check", "engine-update", "engine-update-run"):
+    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check", "engine-install", "engine-install-run", "engine-update", "engine-update-run"):
         arg = sys.argv[2] if len(sys.argv) > 2 else ""
         return engine_action(verb, arg)
     if verb == "library-fetch":
         return library.fetch(sys.argv[2] if len(sys.argv) > 2 else "")
     if verb == "library-add":
-        print(json.dumps(library.add_from_url(sys.argv[2] if len(sys.argv) > 2 else "")))
-        return 0
+        return emit_result(library.add_from_url(sys.argv[2] if len(sys.argv) > 2 else ""))
     if verb == "library-download":
-        print(json.dumps(library.start_download(sys.argv[2] if len(sys.argv) > 2 else "")))
-        return 0
+        return emit_result(library.start_download(sys.argv[2] if len(sys.argv) > 2 else ""))
     if verb == "library-load":
+        if not host_probe()[-1]:
+            return emit_result({"success": False, "error": "Model loading requires an amdgpu Strix Halo host; unsupported hardware is install-only preview."})
         model_id = sys.argv[2] if len(sys.argv) > 2 else ""
         confirm = "--confirm" in sys.argv
         snap = snapshot()
-        print(json.dumps(library.load_checked(model_id, snap.get("gtt_total_gib"), confirm)))
-        return 0
+        return emit_result(library.load_checked(model_id, snap.get("gtt_total_gib"), confirm))
     if verb == "library-unload":
-        print(json.dumps(library.unload_model(sys.argv[2] if len(sys.argv) > 2 else "")))
-        return 0
+        return emit_result(library.unload_model(sys.argv[2] if len(sys.argv) > 2 else ""))
     if verb == "library-delete":
         model_id = sys.argv[2] if len(sys.argv) > 2 else ""
         confirm = "--confirm" in sys.argv
         snap = snapshot()
-        print(json.dumps(library.delete_model(model_id, snap.get("gtt_total_gib"), confirm)))
-        return 0
+        return emit_result(library.delete_model(model_id, snap.get("gtt_total_gib"), confirm))
+    if verb == "webui-access":
+        return emit_result(webui.set_access(sys.argv[2] if len(sys.argv) > 2 else "", "--confirm" in sys.argv))
     if verb == "webui-install-run":
         return webui.install()
     if verb == "webui-install":
-        print(json.dumps(webui.start_install()))
-        return 0
+        return emit_result(webui.start_install())
     if verb == "webui-start":
-        print(json.dumps(webui.start()))
-        return 0
+        return emit_result(webui.start())
     if verb == "webui-stop":
-        print(json.dumps(webui.stop()))
-        return 0
+        return emit_result(webui.stop())
     if verb == "webui-check":
-        print(json.dumps(webui.check()))
-        return 0
+        return emit_result(webui.check())
     if verb == "webui-update":
-        print(json.dumps(webui.start_update()))
-        return 0
+        return emit_result(webui.start_update())
     if verb == "webui-update-run":
         return webui.update_run(sys.argv[2] if len(sys.argv) > 2 else "")
     print("unknown verb: %s" % verb, file=sys.stderr)
