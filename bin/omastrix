@@ -247,6 +247,8 @@ def host_probe():
 
 
 def snapshot():
+    import plugin_update
+
     device, uevent, pci, slot, name, halo = host_probe()
     mem_bytes = mem_total_bytes()
     gtt_total = read_int(os.path.join(device, "mem_info_gtt_total")) if device else None
@@ -291,6 +293,7 @@ def snapshot():
         "mem_total_gib": gib(mem_bytes),
         "pill": pill_text,
         "vertical": "GTT" if halo else "?",
+        "plugin": plugin_update.status(),
         "engine": engine_info(),
         "webui": webui_info(),
         "library": lib,
@@ -626,6 +629,12 @@ def main():
     if verb in ("snapshot", "status"):
         print(json.dumps(snapshot(), separators=(",", ":")))
         return 0
+    if verb in ("plugin-check", "plugin-update", "plugin-update-run"):
+        import plugin_update
+
+        action = {"plugin-check": plugin_update.check, "plugin-update": plugin_update.start_update,
+                  "plugin-update-run": plugin_update.update_run}[verb]
+        return emit_result(action())
     if verb == "set-gtt":
         if len(sys.argv) < 3 or sys.argv[2] not in GTT_CHOICES:
             print("set-gtt needs 64, 96, or 110", file=sys.stderr)

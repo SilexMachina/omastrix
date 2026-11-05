@@ -81,8 +81,8 @@ still-open release gates; a checked item is not blanket fresh-install acceptance
 - [ ] Fresh Open WebUI initial account provisioning works with authentication
   on and signup off; verify loopback bootstrap, confirmed network opt-in, secret permissions,
   and occupied-port behavior. Do not weaken auth as a workaround.
-- [x] Native UI fixture evidence: six ordinary layouts with sixteen checks each
-  plus two unsupported-host policy cases (98 total checks). See the [dated evidence and limits](publication-audit.md#ui-evidence).
+- [x] Native UI fixture evidence: six ordinary layouts with seventeen checks each
+  plus two unsupported-host policy cases (104 total checks). See the [dated evidence and limits](publication-audit.md#ui-evidence).
 - [ ] Authorized live-shell placement/focus and log inspection of the current
   candidate. No shell reload was performed in the resumed review. Fixture tests
   do not close hardware/backend lifecycle or clean-host acceptance.

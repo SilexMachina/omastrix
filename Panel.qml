@@ -27,6 +27,7 @@ Panel {
   readonly property bool hasSnapshot: payload.strix_halo !== undefined
   readonly property var engine: payload.engine || ({})
   readonly property var webui: payload.webui || ({})
+  readonly property var pluginInfo: payload.plugin || ({})
   readonly property var models: payload.library ? (payload.library.rows || []) : []
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
@@ -47,7 +48,7 @@ Panel {
     ["Install", "Start", "Stop", "Working…"].map(function(text) { return root.actionTextWidth(text) })))
   readonly property int serviceCheckWidth: Math.ceil(modelButtonChrome + Math.max(
     root.actionTextWidth("Check updates"), root.actionTextWidth("Checking…")))
-  readonly property int serviceUpdateWidth: Math.ceil(modelButtonChrome + root.actionTextWidth("Update"))
+  readonly property int serviceUpdateWidth: Math.ceil(modelButtonChrome + Math.max(root.actionTextWidth("Update"), root.actionTextWidth("Updating…")))
   readonly property int actionsWidth: root.modelPrimaryWidth + root.modelDeleteWidth + Style.space(8)
 
   FontMetrics { id: modelActionFont; font.family: Style.font.family; font.pixelSize: Style.font.body }
@@ -78,6 +79,7 @@ Panel {
   function persistentError(scope) {
     if (scope === "engine") return engine.update_error || ""
     if (scope === "webui") return webui.error || ""
+    if (scope === "plugin") return pluginInfo.error || ""
     for (var i = 0; i < models.length; ++i)
       if (models[i].id === scope) return models[i].error || ""
     return ""
@@ -341,6 +343,8 @@ Panel {
               width: parent.width
               spacing: Style.space(16)
               Label { text: "System"; font.pixelSize: Style.font.title; font.bold: true }
+              PluginUpdateRow { width: parent.width }
+              Divider { width: parent.width }
               ServiceRow { width: parent.width; kind: "engine"; title: "strix-llama.cpp"; info: root.engine }
               Divider { width: parent.width }
               ServiceRow { width: parent.width; kind: "webui"; title: "Open WebUI"; info: root.webui }
@@ -611,6 +615,58 @@ Panel {
         }
       }
     }
+  }
+
+  component PluginUpdateRow: Column {
+    id: pluginRow
+    readonly property string title: "OmaStrix"
+    spacing: Style.space(10)
+    GridLayout {
+      width: parent.width
+      columns: pluginRow.width < Style.space(800) ? 1 : 2
+      columnSpacing: Style.space(12)
+      rowSpacing: Style.space(10)
+      Column {
+        Layout.fillWidth: true
+        Layout.minimumWidth: 0
+        spacing: Style.space(4)
+        Label { text: pluginRow.title; font.bold: true }
+        Label {
+          width: parent.width
+          text: View.pluginDetail(root.pluginInfo, root.payload.app_version)
+          wrapMode: Text.Wrap
+          opacity: 0.65
+          font.pixelSize: Style.font.caption
+        }
+      }
+      Row {
+        Layout.alignment: Qt.AlignLeft
+        spacing: Style.space(8)
+        ActionButton {
+          width: root.serviceCheckWidth
+          text: root.busy && root.actionArgs[0] === "plugin-check" ? "Checking…" : "Check updates"
+          actionContext: pluginRow.title
+          enabled: !root.busy && !root.pluginInfo.updating && root.pluginInfo.managed === true
+          tooltipText: root.pluginInfo.managed === false ? "Requires an installed Git checkout" : "Check for OmaStrix updates"
+          onClicked: root.runAction(["plugin-check"], "plugin")
+        }
+        Item {
+          width: root.serviceUpdateWidth
+          height: pluginUpdate.implicitHeight
+          ActionButton {
+            id: pluginUpdate
+            anchors.fill: parent
+            visible: root.pluginInfo.update_available === true || root.pluginInfo.updating === true
+            text: root.pluginInfo.updating ? "Updating…" : "Update"
+            actionContext: pluginRow.title
+            enabled: !root.busy && !root.pluginInfo.updating && root.pluginInfo.update_available === true
+            tooltipText: "Update OmaStrix using Omarchy's plugin updater"
+            onClicked: root.runAction(["plugin-update"], "plugin")
+          }
+        }
+      }
+    }
+    Feedback { width: parent.width; scope: "plugin" }
   }
 
   component ServiceRow: Column {

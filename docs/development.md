@@ -6,7 +6,8 @@ a second feature specification.
 
 ## Source map
 
-Runtime code is `Panel.qml`, `bin/omastrix`, `bin/library.py`, `bin/webui.py`, and
+Runtime code is `Panel.qml`, `bin/omastrix`, `bin/library.py`, `bin/webui.py`,
+`bin/plugin_update.py`, and
 `bin/omastrix-engine-install`. Data/configuration shipped by the plugin is
 `manifest.json`, `catalog.json`, and `engine-pin.json`. See Design for their roles.
 `View.js` owns pure presentation helpers and `ActionButton.qml` supplies shared
@@ -68,7 +69,7 @@ cases cover unsupported hosts at normal and compact/enlarged sizes. Test screen 
 from 600 to 1280 px; enlarged-font cases use an 18 px base font. The adapter
 applies the installed popup's themed padding and border insets.
 
-Each ordinary case runs sixteen behavioral checks: real Qt text entry, Tab/j/k,
+Each ordinary case runs seventeen behavioral checks: real Qt text entry, Tab/j/k,
 disabled controls, contextual accessible names, service transitions, scoped and
 recurring errors, confirmation/cancel, Escape, scroll-to-focus, and model/GTT
 bounds and overlap. The isolated HOME and fixture backend keep real services and

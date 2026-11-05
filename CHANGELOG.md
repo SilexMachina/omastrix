@@ -5,6 +5,10 @@ manifest versions `0.1.0`, `0.2.0` and `0.3.0` identified internal development
 cuts, not published releases; their commits remain in Git history. The first
 planned release is 0.5.0.
 
+## [0.5.0-preview.3] - Unreleased
+
+- Check for and install OmaStrix updates directly in the panel, with protected local changes and persistent update status.
+
 ## [0.5.0-preview.2] - Unreleased
 
 - Fresh engine installs select the newest published Halo build; enable WebUI installation when its service has not been created yet.

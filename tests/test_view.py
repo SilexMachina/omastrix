@@ -16,6 +16,13 @@ class ViewTests(unittest.TestCase):
         self.assertIn('!service.unsupportedStart', source)
         self.assertIn('root.halo && root.engine.state === "running"', source)
 
+    def test_plugin_updates_have_scoped_native_controls(self):
+        source = (ROOT / 'Panel.qml').read_text()
+        self.assertIn('["plugin-check"]', source)
+        self.assertIn('["plugin-update"]', source)
+        self.assertIn('scope: "plugin"', source)
+        self.assertIn('View.pluginDetail', source)
+
     def test_webui_has_explicit_local_and_network_access_controls(self):
         source = (ROOT / 'Panel.qml').read_text()
         self.assertIn('text: "This device"', source)

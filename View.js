@@ -21,6 +21,15 @@ function serviceState(info) {
     primaryEnabled: !working && (info.installed ? (stopped || state === "running") : state === "not_installed")};
 }
 
+function pluginDetail(info, fallbackVersion) {
+  var version = info.version || fallbackVersion || "";
+  if (info.updating) return version + " · Updating…";
+  if (info.update_available) return version + " · " + (info.latest_version && info.latest_version !== version
+    ? info.latest_version + " available" : "New revision available");
+  if (info.checked_at && !info.error) return version + " · Up to date";
+  return version;
+}
+
 function serviceDetail(info, isEngine) {
   var version = isEngine ? (info.build ? "Build " + info.build : "") : (info.version || "");
   var latest = isEngine ? info.latest_build : info.latest_version;

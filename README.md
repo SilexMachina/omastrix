@@ -52,9 +52,13 @@ omarchy plugin update silexmachina.omastrix
 omarchy plugin remove silexmachina.omastrix
 ```
 
-Plugin updates follow the repository's default branch and ask for confirmation.
+Use the **OmaStrix** row in the panel to check for and install plugin updates.
+It uses Omarchy's native updater without opening the terminal diff viewer. The
+terminal command above is also available and displays changes before asking for
+confirmation; add `--yes` to skip that display/prompt. Updates follow the repository's
+default branch and preserve running engine/WebUI services. Local changes are protected.
 A normal `omarchy update` does not currently update Git-managed plugins. The
-panel's engine/WebUI update buttons manage those components separately.
+engine/WebUI rows manage those components separately.
 
 Removing the plugin removes its panel/checkout. It preserves downloaded models,
 application installs, user services, settings and chats. Stop OmaStrix services

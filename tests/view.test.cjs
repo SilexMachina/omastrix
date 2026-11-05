@@ -76,6 +76,16 @@ test('missing GTT readings stay unavailable while measured zero remains zero', (
   assert.equal(context.formatGttUsed('12.36'), '12.4');
 });
 
+test('plugin detail distinguishes checks, commits and background updates', () => {
+  assert.equal(context.pluginDetail({version:'1.0.0'}, ''), '1.0.0');
+  assert.equal(context.pluginDetail({version:'1.0.0', checked_at:'now'}, ''), '1.0.0 · Up to date');
+  assert.equal(context.pluginDetail({version:'1.0.0', checked_at:'old', error:'Network failed'}, ''), '1.0.0');
+  assert.equal(context.pluginDetail({version:'1.0.0', latest_version:'1.1.0', update_available:true}, ''), '1.0.0 · 1.1.0 available');
+  assert.equal(context.pluginDetail({version:'1.0.0', latest_version:'1.0.0', update_available:true}, ''), '1.0.0 · New revision available');
+  assert.equal(context.pluginDetail({version:'1.0.0', updating:true}, ''), '1.0.0 · Updating…');
+  assert.equal(context.pluginDetail({}, '0.5.0'), '0.5.0');
+});
+
 test('service detail presents update results beside its version', () => {
   assert.equal(context.serviceDetail({build: 12, latest_build: 12}, true), 'Build 12 · Up to date');
   assert.equal(context.serviceDetail({build: 12, latest_build: 13, update_available: true}, true), 'Build 12 · Build 13 available');

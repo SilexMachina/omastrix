@@ -88,6 +88,22 @@ Dependency installation remains manual in this preview update. The combined
 follow-up suite passes 210 offline tests and 98 native fixture checks. These
 checks do not replace real first-account/browser acceptance on the test machine.
 
+## Preview.3 follow-up
+
+The OmaStrix System row now checks for and installs plugin updates using the
+native updater's noninteractive `--yes` path. Checks are manual and cached;
+ordinary status polling stays offline. The backend requires the installed Git
+checkout, protects local changes/divergent history, serializes requests, and
+runs a detached worker that survives the plugin reload. Completion requires a
+successful native exit plus installed HEAD/FETCH_HEAD/version readback. Timeout
+and abandoned-worker failures remain visible beside the controls.
+
+The combined suite passes 228 offline tests, including 17 isolated updater
+cases using local Git repositories and a fake native command. Native UI fixtures
+pass 104 checks across eight layouts, including check/update progress, scoped
+errors, refreshed version and unsupported-host behavior. These tests do not
+restart real services or run the real self-update on the development checkout.
+
 ## Remaining before stable 0.5.0
 
 - Fresh Omarchy/Strix Halo setup, dependency/build acceptance and RADV heap checks.

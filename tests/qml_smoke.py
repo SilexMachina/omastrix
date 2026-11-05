@@ -173,7 +173,7 @@ ShellRoot {
         var buttons = []
         walk(plugin.smokeKeys, function(o) { return typeof o.clicked === "function" }, buttons, [])
         verify(buttons.length >= 20)
-        var checks = controls("Check updates").filter(function(button) { return button.visible })
+        var checks = controls("Check updates").filter(function(button) { return button.visible && button.actionContext !== "OmaStrix" })
         compare(checks.length, 2)
         compare(Math.round(checks[0].mapToItem(plugin.smokeKeys, 0, 0).x),
                 Math.round(checks[1].mapToItem(plugin.smokeKeys, 0, 0).x),
@@ -240,7 +240,7 @@ ShellRoot {
         var starts = controls("Start").filter(function(button) { return button.visible })
         compare(starts.length, 2)
         verify(starts.every(function(button) { return !button.enabled }), "Unknown/transitional service states disable Start")
-        verify(!visibleControl("Update").enabled, "Transitional service state disables Update")
+        verify(!controls("Update").filter(function(button) { return button.actionContext === "Open WebUI" })[0].enabled, "Transitional service state disables Update")
         plugin.payload = original
       }
       function test_02d_network_access_controls() {
@@ -263,6 +263,31 @@ ShellRoot {
         plugin.payload = original
         plugin.actionArgs = []
         plugin.smokeScroll.contentY = 0
+      }
+      function test_02e_plugin_updates() {
+        var check = controls("Check updates").filter(function(button) { return button.actionContext === "OmaStrix" })[0]
+        verify(check.enabled)
+        mouseClick(check, check.width / 2, check.height / 2)
+        tryVerify(function() { return !plugin.busy && plugin.actionArgs[0] === "plugin-check" }, 5000)
+        wait(100)
+        plugin.setMessage("plugin", "TEST FIXTURE plugin error")
+        plugin.refresh()
+        wait(100)
+        compare(plugin.messageFor("plugin"), "TEST FIXTURE plugin error")
+        plugin.dismiss("plugin")
+        var update = controls("Update").filter(function(button) { return button.actionContext === "OmaStrix" })[0]
+        verify(update.enabled)
+        mouseClick(update, update.width / 2, update.height / 2)
+        tryVerify(function() { return plugin.pluginInfo.updating === true }, 5000)
+        verify(!visibleControl("Updating…").enabled)
+        verify(!check.enabled)
+        compare(plugin.engine.state, "running")
+        compare(plugin.webui.state, "stopped")
+        plugin.runAction(["fixture-plugin-updated"], "plugin")
+        tryVerify(function() { return plugin.pluginInfo.version === "TEST-NEXT" && !plugin.pluginInfo.updating }, 5000)
+        verify(check.enabled)
+        compare(plugin.messageFor("plugin"), "")
+        plugin.actionArgs = []
       }
       function test_03_keyboard_traversal() {
         plugin.smokeKeys.forceActiveFocus()
@@ -445,7 +470,7 @@ def fixture() -> dict:
                          status_label=label, installed=installed, fits=fits, status=status,
                          deletable=installed, progress=35, notes="TEST FIXTURE memory budget" if not fits else ""))
     return dict(test_fixture="SYNTHETIC UI SMOKE DATA; NOT HOST STATUS", strix_halo=True,
-                app_version="TEST FIXTURE", pill="GTT TEST", gtt_set="64", gtt_choices=["64", "96"],
+                app_version="TEST FIXTURE", plugin=dict(managed=True, version="TEST", latest_version="TEST-NEXT", update_available=True, updating=False), pill="GTT TEST", gtt_set="64", gtt_choices=["64", "96"],
                 gtt_used_gib=12, gtt_total_gib=64, engine=dict(installed=True, state="running", build="TEST"),
                 webui=dict(installed=True, running=False, state="stopped", version="TEST", access="local", bind_host="127.0.0.1", update_available=True, latest_version="TEST-NEXT"), library=dict(rows=rows))
 
@@ -508,6 +533,18 @@ with (base / "backend-calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\\n")
 if args == ["snapshot"]:
     print((base / "snapshot.json").read_text())
+elif args == ["plugin-check"]:
+    print(json.dumps(dict(success=True)))
+elif args == ["plugin-update"]:
+    snapshot = json.loads((base / "snapshot.json").read_text())
+    snapshot["plugin"]["updating"] = True
+    (base / "snapshot.json").write_text(json.dumps(snapshot))
+    print(json.dumps(dict(success=True)))
+elif args == ["fixture-plugin-updated"]:
+    snapshot = json.loads((base / "snapshot.json").read_text())
+    snapshot["plugin"].update(version="TEST-NEXT", latest_version="TEST-NEXT", updating=False, update_available=False, checked_at="TEST")
+    (base / "snapshot.json").write_text(json.dumps(snapshot))
+    print(json.dumps(dict(success=True)))
 elif args == ["webui-install"]:
     print(json.dumps(dict(success=True)))
 elif args == ["library-download", "fixture-remote"]:
@@ -635,12 +672,12 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
     print(f"=== {name} exit={code} ===\n{output}")
     callfile = plugin / "backend-calls.jsonl"
     calls = [json.loads(line) for line in callfile.read_text().splitlines()] if callfile.exists() else []
-    allowed = [["webui-install"], ["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
+    allowed = [["plugin-check"], ["plugin-update"], ["fixture-plugin-updated"], ["webui-install"], ["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
     unexpected = [call for call in calls if call not in allowed]
     platform_warnings = [line for line in output.splitlines() if line.strip() == "WARN: This plugin does not support setting window masks"]
     bad_log = [line for line in output.splitlines() if re.search(r"\b(?:WARN|ERROR|FAIL!)\b", line) and line not in platform_warnings]
     outcomes = re.findall(r"SMOKE_END (test_\w+) failed=(true|false)", output)
-    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 16)
+    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 17)
           and all(failed == "false" for _, failed in outcomes)
           and not unexpected and not bad_log and screenshot.exists())
     return dict(name=name, passed=ok, exit_code=code, warnings_errors=sorted(set(bad_log)),

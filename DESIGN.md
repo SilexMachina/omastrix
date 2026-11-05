@@ -72,6 +72,13 @@ Keep both panes visible. Once installed, the engine Start button is urgent-color
 and disabled; Install remains available. This is the same distribution as the
 Strix Halo build, with no test-mode switch.
 
+Include an OmaStrix update row above the service rows. Manual Check updates
+fetches the installed checkout's origin/default HEAD and compares revisions;
+Update launches `omarchy plugin update silexmachina.omastrix --yes` asynchronously.
+Protect local modifications and divergent history, persist update errors/status
+across plugin reload, and verify the installed commit/version after the command.
+Never restart the engine or WebUI to update the plugin. Status polling stays local.
+
 Use compact service rows for strix-llama.cpp and Open WebUI. Each row combines
 name, installed version/state, and relevant shared action buttons: Install when
 missing, Start/Stop, Open, Check, and Update when applicable. Busy state and

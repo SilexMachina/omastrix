@@ -35,7 +35,15 @@ the plugin version. Node.js is needed for development tests.
 **Stop** shuts it down. Stopping the engine releases its loaded model.
 **Open** launches the component's browser interface while it is running.
 
-**Check updates** refreshes the available version beside the component name.
+The **OmaStrix** row checks and updates the plugin itself. Choose **Check updates**,
+then **Update** when a newer revision is available. The app uses Omarchy's native
+updater without the terminal diff viewer. It preserves engine/WebUI services and
+models; the panel may close briefly while Omarchy reloads plugins. Local checkout
+changes or divergent history block an update and are reported beside the row.
+Checks are manual; normal status polling does not contact GitHub. Git-managed
+installation is required.
+
+For strix-llama.cpp and Open WebUI, **Check updates** refreshes the available version beside the component name.
 To apply an update, stop that component and choose **Update**. Start it again
 when ready. The engine uses published Halo build tags; Open WebUI uses stable
 Python-package versions. Each has its own version, independent of OmaStrix.
