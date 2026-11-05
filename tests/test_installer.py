@@ -101,7 +101,7 @@ if name == "cmake":
     sys.exit(settings.get("build_code", 0))
 sys.exit(0)
 '''
-        for name in ("git", "cmake", "systemctl", "ninja", "c++", "cc", "glslc", "pkg-config"):
+        for name in ("git", "cmake", "systemctl", "ninja", "c++", "cc", "glslc", "pkg-config", "pacman", "lspci"):
             path = self.tools / name
             path.write_text(stub)
             path.chmod(0o755)
@@ -280,7 +280,7 @@ sys.exit(0)
 
 
     def test_python_worker_can_install_without_relocking_its_engine_lock(self):
-        for name in ("omastrix", "library.py", "webui.py"):
+        for name in ("omastrix", "library.py", "webui.py", "dependencies.py"):
             shutil.copy2(ROOT / "bin" / name, self.repo / "bin" / name)
         self.control.write_text(json.dumps(self.settings))
         selected = "b" * 40

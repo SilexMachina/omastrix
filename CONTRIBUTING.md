@@ -1,22 +1,21 @@
 # Contributing
 
-OmaStrix is in private development with no published release. Access to the
-repository does not authorize publication, tags, releases, or machine changes.
+Bug reports and focused patches are welcome for this experimental preview.
 
-- Read [Design](DESIGN.md), [development](docs/development.md), and
-  [operating safety](AGENTS.md) before changing behavior.
-- Keep changes focused. Include isolated tests for tooling/backend changes and
-  update the current [changelog](CHANGELOG.md) section for user-visible changes.
-- Follow Omarchy's shared UI components/theme. Provide evidence for light/dark,
-  narrow-screen, keyboard, busy, failure, and confirmation states when changing UI.
-- Do not run real installs/downloads/model actions, privileged GTT operations,
-  service restarts, or reboots without explicit approval for that test.
-- Follow the [recipe evidence requirements](docs/development.md#recipes-and-evidence).
-  No dated reproducible benchmark evidence means no public speed claim.
-- Keep docs canonical in this repo and link instead of duplicating specifications.
-- Do not include credentials, prompts/chat history, private endpoints, machine
-  configuration, or unrelated personal documents in patches or issue reports.
+For a bug, include the plugin and engine versions, relevant OS/shell and hardware
+requirements, reproduction steps, expected versus observed behavior, and a
+redacted error. Use [SECURITY.md](SECURITY.md) for security-sensitive findings.
 
-For a bug, provide the version/commit, environment, reproduction steps, expected
-versus observed behavior, and a redacted error. Use [SECURITY.md](SECURITY.md) for
-security-sensitive reports. Release decisions follow [the release guide](docs/releasing.md).
+- Keep changes focused and include isolated tests for changed behavior.
+- Follow Omarchy's shared UI components and theme. Keep controls accessible by
+  keyboard and usable in light/dark themes, narrow panels and enlarged fonts.
+- Keep installation, download, load, deletion and service actions explicit.
+  Preserve unrelated files and running workloads.
+- Do not include credentials, chat history, private endpoints, personal paths,
+  or unrelated system configuration in patches or issue reports.
+- Preserve third-party notices and document applicable component/model licenses.
+- Support performance claims with reproducible measurements; do not infer speed
+  from model size or hardware specifications alone.
+
+See the [user guide](docs/user-guide.md) for supported behavior and
+[component and model licenses](docs/licenses.md) for redistribution conditions.

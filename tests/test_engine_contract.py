@@ -15,10 +15,75 @@ class EngineContractTests(IsolatedBackend):
         probe = mock.patch.object(backend, "gpu_devices", return_value=[])
         probe.start()
         self.addCleanup(probe.stop)
+        deps = mock.patch.object(backend.dependencies, "missing", return_value=[])
+        deps.start()
+        self.addCleanup(deps.stop)
         self.real_lookup = backend.newest_halo_tag
         lookup = mock.patch.object(backend, "newest_halo_tag", return_value=(12345, "b12345", "a" * 40))
         lookup.start()
         self.addCleanup(lookup.stop)
+
+    def test_dependency_approval_does_not_lookup_build_or_launch_packages(self):
+        with mock.patch.object(backend, "engine_info", return_value={"state": "not_installed"}), \
+             mock.patch.object(backend.dependencies, "missing", return_value=["cmake", "ninja"]), \
+             mock.patch.object(backend, "newest_halo_tag") as lookup, \
+             mock.patch("subprocess.Popen") as spawn:
+            result = backend.start_engine_install()
+        self.assertEqual(result["confirmation"], "dependencies")
+        self.assertEqual(result["packages"], ["cmake", "ninja"])
+        lookup.assert_not_called()
+        spawn.assert_not_called()
+        self.assertFalse(Path(backend.engine_paths()["update"]).exists())
+
+    def test_confirmed_dependencies_launch_detached_exact_selection_and_remain_pollable(self):
+        with mock.patch.object(backend, "engine_info", return_value={"state": "not_installed"}), \
+             mock.patch.object(backend.dependencies, "missing", return_value=["git"]), \
+             mock.patch("subprocess.Popen", return_value=mock.Mock(pid=12345)) as spawn:
+            self.assertTrue(backend.start_engine_install(confirm=True)["success"])
+        self.assertEqual(spawn.call_args.args[0][1:], ["engine-dependencies-run", "a" * 40])
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        saved = backend.read_json(backend.engine_paths()["update"])
+        self.assertEqual(saved["phase"], "dependencies")
+        self.assertEqual(saved["pid"], 12345)
+        with mock.patch.object(backend, "systemctl", return_value=(4, "inactive")), \
+             mock.patch.object(backend, "port_open", return_value=False), \
+             mock.patch.object(backend, "pid_alive", return_value=True):
+            info = backend.engine_info()
+        self.assertEqual(info["state"], "installing")
+        self.assertFalse(info["installed"])
+
+    def test_dependency_denial_persists_pid_zero_without_engine_build(self):
+        with mock.patch.object(backend, "systemctl", return_value=(3, "inactive")), \
+             mock.patch.object(backend.dependencies, "install", side_effect=ValueError("dependencies denied")), \
+             mock.patch("subprocess.call") as build, self.quiet():
+            self.assertEqual(backend.engine_update_run("a" * 40, first_install=True, install_dependencies=True), 1)
+        build.assert_not_called()
+        saved = backend.read_json(backend.engine_paths()["update"])
+        self.assertEqual(saved["pid"], 0)
+        self.assertIn("dependencies denied", saved["error"])
+
+    def test_confirmed_webui_launcher_never_installs_packages_in_foreground(self):
+        webui = backend.webui
+        with mock.patch.object(webui, "current_venv", return_value=None), \
+             mock.patch.object(webui, "require_stopped"), \
+             mock.patch.object(webui, "find_uv", return_value=""), \
+             mock.patch.object(webui.dependencies, "install") as packages, \
+             mock.patch("subprocess.Popen", return_value=mock.Mock(pid=12345)) as spawn:
+            self.assertTrue(webui.start_install(confirm=True)["success"])
+        packages.assert_not_called()
+        self.assertEqual(spawn.call_args.args[0][1:], ["webui-install-run", "--confirm"])
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        saved = webui.read_json(webui.install_state_path())
+        self.assertEqual(saved["phase"], "dependencies")
+        self.assertEqual(saved["pid"], 12345)
+
+    def test_confirm_dispatch_for_both_installers(self):
+        for verb, target in (("engine-install", "start_engine_install"), ("webui-install", "start_install")):
+            module = backend if verb == "engine-install" else backend.webui
+            with mock.patch("sys.argv", ["omastrix", verb, "--confirm"]), \
+                 mock.patch.object(module, target, return_value={"success": True}) as install, self.quiet():
+                self.assertEqual(backend.main(), 0)
+                install.assert_called_once_with(confirm=True)
 
     def test_install_resolves_and_records_latest_immutable_selection_before_spawn(self):
         selection = (12345, "b12345", "a" * 40)
@@ -66,6 +131,18 @@ class EngineContractTests(IsolatedBackend):
                     remote.return_value = response
                 self.assertFalse(backend.start_engine_install()["success"])
                 spawn.assert_not_called()
+
+    def test_missing_git_can_resolve_exact_build_before_dependency_worker(self):
+        refs = [{"ref": "refs/tags/b12345", "object": {"sha": "a" * 40, "type": "tag"}},
+                {"ref": "refs/tags/b9", "object": {"sha": "b" * 40, "type": "commit"}}]
+        peeled = {"object": {"sha": "c" * 40, "type": "commit"}}
+        def response(url, **kwargs):
+            self.assertTrue(url.startswith("https://api.github.com/repos/halo-box/strix-llama.cpp/git/"))
+            body = peeled if "/git/tags/" in url else refs
+            return contextlib.closing(io.BytesIO(json.dumps(body).encode()))
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("git")), \
+             mock.patch("urllib.request.urlopen", side_effect=response):
+            self.assertEqual(self.real_lookup(), (12345, "b12345", "c" * 40))
 
     def test_latest_annotated_tag_uses_peeled_commit_not_tag_object(self):
         output = ("a" * 40 + "\trefs/tags/b99\n" + "b" * 40 + "\trefs/tags/b100\n"

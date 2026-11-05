@@ -3,8 +3,8 @@
 ## Setup status
 
 This is a public preview. Install/update/removal commands are in the
-[README](../README.md#install). A complete setup wizard and clean-machine
-acceptance remain pending; see the [preview readiness report](publication-audit.md).
+[README](../README.md#install). A complete setup wizard is not yet available.
+Fresh-install, reboot/recovery and full catalog coverage remain preview limitations.
 
 On unsupported hardware, the same panel shows a prominent warning. Engine
 installation, WebUI and model downloads remain available for testing. Engine
@@ -18,21 +18,31 @@ there skips Strix GPU acceptance and does not claim inference support.
   Other hosts can test installation, WebUI and model downloads.
 - Python 3, Git, curl, `lspci`, `ss`, and `systemctl`.
 - Engine build tools: C/C++ compiler, CMake, Ninja, Vulkan headers/tools, and
-  SPIR-V headers. The installer reports missing dependencies before building.
+  SPIR-V headers. **Install** offers to install missing system packages.
 - Optional Open WebUI: `uv` and network access to resolve its Python packages.
-- GTT configuration: Limine tooling, `pkexec`, and a bootable recovery path.
+  **Install** offers to install `uv` when needed.
+- Package installation: Omarchy's package manager and a working `pkexec`
+  authorization prompt.
+- GTT configuration: Limine tooling and a bootable recovery path.
 
 Engine Install checks the newest published Halo build and compiles that exact
 commit. Discovery failures are reported without installing an older baseline.
 Existing installations are preserved until Update is explicitly selected.
-`engine-pin.json` remains a reproducible development baseline. Optional Open WebUI first install selects
+`engine-pin.json` records a reproducible engine baseline. Optional Open WebUI first install selects
 `open-webui==0.13.0` on Python 3.11; Check/Update is explicit and independent of
-the plugin version. Node.js is needed for development tests.
+the plugin version.
 
 ## System controls
 
-**Install** builds or installs the missing component. **Start** runs it;
-**Stop** shuts it down. Stopping the engine releases its loaded model.
+**Install** builds or installs the missing component. If prerequisites are
+missing, review the package list and choose **Confirm**, then authorize the
+system package installation. OmaStrix continues setup in the background and
+shows installation progress. **Cancel** leaves packages unchanged; denied or
+failed authorization reports an error beside that component. A failed package
+installation does not start the build. Retry **Install** after resolving it.
+
+**Start** runs the component; **Stop** shuts it down. Stopping the engine releases
+its loaded model.
 **Open** launches the component's browser interface while it is running.
 
 The **OmaStrix** row checks and updates the plugin itself. Choose **Check updates**,
@@ -128,8 +138,7 @@ the service. Existing installations retain their configured host.
 
 OmaStrix provides no TLS or firewall rules. Keep port 3000 private and restrict
 access to trusted clients. Network enablement currently requires the local
-SQLite database; custom `DATABASE_URL` configurations fail closed. Fresh-account
-end-to-end acceptance remains part of the release checklist.
+SQLite database; custom `DATABASE_URL` configurations fail closed.
 
 OmaStrix manages its own Open WebUI copy. Unrelated installations remain
 independent. Keep environment files and databases private.

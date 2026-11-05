@@ -6,7 +6,7 @@ Panel.qml gets aliases for private test access and substitutes ONLY the
 layer-shell KeyboardPanel window with an offscreen FloatingWindow adapter:
 installed Quickshell has no offscreen PanelWindow backend. Production content,
 controls, and handlers remain unchanged. Compositor placement/focus ownership
-are outside this harness; the copied UI is not a live desktop integration test.
+are outside this fixture runner; the copied UI is not a live desktop integration test.
 Every backend response is an explicitly synthetic test fixture. No compositor
 connection or desktop input is used. Artifacts persist under $TMPDIR.
 """
@@ -289,6 +289,29 @@ ShellRoot {
         compare(plugin.messageFor("plugin"), "")
         plugin.actionArgs = []
       }
+      function test_02f_dependency_confirmation() {
+        for (var kind of ["engine", "webui"]) {
+          plugin.runAction([kind + "-install"], kind)
+          tryVerify(function() { return plugin.confirmation.scope === kind }, 5000)
+          verify(plugin.confirmation.text.indexOf("packages") >= 0)
+          verify(plugin.confirmation.text.indexOf("Administrator") >= 0)
+          var cancel = visibleControl("Cancel")
+          reveal(cancel)
+          mouseClick(cancel, cancel.width / 2, cancel.height / 2)
+          compare(plugin.confirmation.scope, undefined)
+          verify(plugin.actionArgs.indexOf("--confirm") < 0)
+          plugin.runAction([kind + "-install"], kind)
+          tryVerify(function() { return plugin.confirmation.scope === kind }, 5000)
+          var confirm = visibleControl("Confirm")
+          reveal(confirm)
+          mouseClick(confirm, confirm.width / 2, confirm.height / 2)
+          tryVerify(function() { return !plugin.busy && plugin.actionArgs.indexOf("--confirm") >= 0 }, 5000)
+          compare(plugin.messageFor(kind), "")
+          compare(plugin.confirmation.scope, undefined)
+        }
+        plugin.actionArgs = []
+        plugin.smokeScroll.contentY = 0
+      }
       function test_03_keyboard_traversal() {
         plugin.smokeKeys.forceActiveFocus()
         keyClick(Qt.Key_Tab)
@@ -545,7 +568,11 @@ elif args == ["fixture-plugin-updated"]:
     snapshot["plugin"].update(version="TEST-NEXT", latest_version="TEST-NEXT", updating=False, update_available=False, checked_at="TEST")
     (base / "snapshot.json").write_text(json.dumps(snapshot))
     print(json.dumps(dict(success=True)))
-elif args == ["webui-install"]:
+elif args in (["engine-install"], ["webui-install"]):
+    print(json.dumps(dict(success=False, needs_confirm=True, confirmation="dependencies", packages=["fixture-package"],
+                         error="TEST FIXTURE install required packages? Administrator authorization is required.")))
+    sys.exit(1)
+elif args in (["engine-install", "--confirm"], ["webui-install", "--confirm"]):
     print(json.dumps(dict(success=True)))
 elif args == ["library-download", "fixture-remote"]:
     print(json.dumps(dict(success=True)))
@@ -635,6 +662,7 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
         mouseClick(webuiInstall, webuiInstall.width / 2, webuiInstall.height / 2)
         tryVerify(function() { return !plugin.busy && plugin.actionArgs[0] === "webui-install" }, 5000)
         compare(plugin.messageFor("webui"), "")
+        plugin.confirmation = ({})
         wait(150)
         plugin.payload = original
         plugin.smokeScroll.contentY = 0
@@ -672,12 +700,12 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
     print(f"=== {name} exit={code} ===\n{output}")
     callfile = plugin / "backend-calls.jsonl"
     calls = [json.loads(line) for line in callfile.read_text().splitlines()] if callfile.exists() else []
-    allowed = [["plugin-check"], ["plugin-update"], ["fixture-plugin-updated"], ["webui-install"], ["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
+    allowed = [["engine-install"], ["engine-install", "--confirm"], ["webui-install", "--confirm"], ["plugin-check"], ["plugin-update"], ["fixture-plugin-updated"], ["webui-install"], ["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
     unexpected = [call for call in calls if call not in allowed]
     platform_warnings = [line for line in output.splitlines() if line.strip() == "WARN: This plugin does not support setting window masks"]
     bad_log = [line for line in output.splitlines() if re.search(r"\b(?:WARN|ERROR|FAIL!)\b", line) and line not in platform_warnings]
     outcomes = re.findall(r"SMOKE_END (test_\w+) failed=(true|false)", output)
-    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 17)
+    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 18)
           and all(failed == "false" for _, failed in outcomes)
           and not unexpected and not bad_log and screenshot.exists())
     return dict(name=name, passed=ok, exit_code=code, warnings_errors=sorted(set(bad_log)),

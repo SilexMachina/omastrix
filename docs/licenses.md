@@ -1,9 +1,9 @@
-# Licenses and publication scope
+# Component and model licenses
 
-Audit date: **2026-11-04**. Scope: distributing OmaStrix plugin source,
+Scope: distributing OmaStrix plugin source,
 configuration and documentation, **without model weights, engine binaries or
-Open WebUI packages**. This checklist records the reviewed source texts and
-conditions requiring attention before release or commercial use.
+Open WebUI packages**. This summary identifies applicable source texts and
+conditions requiring attention before redistribution or commercial use.
 
 ## Separate licenses
 
@@ -21,11 +21,8 @@ those uses from a future distribution that actually includes their artifacts.
 
 ## All six catalog recipes
 
-Python checked **6/6 unique recipes**, their pinned API revisions and required
-file URL revisions. Retrieved **6/6 quantizer model cards**, **6/6 named upstream
-model cards**, and **6/6 actual upstream LICENSE texts**; no weights or packages
-were downloaded or installed. These counts describe evidence coverage, not
-compatibility testing or legal clearance.
+The six recipes below link to pinned quantizer cards and named upstream license
+texts. These references do not establish compatibility or legal clearance.
 
 This is a license cross-reference, not a replacement recipe catalog. Every
 source below uses a full immutable revision; the short revisions are reading aids.
@@ -41,18 +38,16 @@ source below uses a full immutable revision; the short revisions are reading aid
 
 **Provenance limit:** the quantizer cards name upstream repositories but do not
 pin the upstream source commit used to make the GGUFs.[7][11][15] Their upstream
-heads were resolved during this audit and the cards/licenses then fetched at
-those immutable commits. This establishes the reviewed texts, **not** the
-historical upstream revision used for quantization. The retained API snapshots
-record both sets of revisions.
+license references below identify immutable commits. They establish the cited
+texts, **not** the historical upstream revision used for quantization.
 
 **Missing quantizer-side notice:** none of the six pinned API file listings
 contained a filename including `license`. In particular, Flash-Next's card says
 `license: other`, `license_name: qwen-community-1.0`, `license_link: LICENSE`,
 but that relative target returned HTTP 404 at its catalog revision.[15]
 The failed [exact LICENSE URL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/raw/766911a6b7369840a91dbcd95f9f997acaab6cd6/LICENSE)
-is recorded in the retrieval manifest. The official upstream license was
-successfully retrieved; do not present the broken quantizer link as a complete
+does not supply a license text. Use the official upstream license; do not present
+the broken quantizer link as a complete
 redistribution notice or substitute for the upstream text.
 
 ### Apache-2.0 models: concrete conditions
@@ -145,8 +140,7 @@ are later copied or bundled:
   bundled UI `big-integer/LICENSE` contains the Unlicense/public-domain
   dedication and disclaimer.[51][47]
 
-The evidence includes all **9 explicitly named engine LICENSE files** found
-in the fetched recursive tree. This is not a full scan of embedded header
+The linked notices are not a full inventory of embedded header
 notices or a built dependency SBOM. For this plugin-only scope, keep upstream
 identification and links; **before bundling engine artifacts**, inventory the
 actual build and preserve all applicable notices instead of copying only the
@@ -179,35 +173,17 @@ actual files at that commit, not a floating license page.[21]
   build dependencies; it is not an all-application dependency clearance.[55]
 
 OmaStrix's integration is not permission to rebrand the Open WebUI application.
-No upstream package was installed or inspected here: tag-source notices were
-reviewed, **not** every license inside a PyPI wheel/transitive dependency.
+The tag-source notices do not cover every license inside a PyPI wheel or
+transitive dependency.
 Recheck any explicitly updated WebUI version and any future bundled package.
 
-## Publication checklist and remaining gaps
+## Redistribution limits
 
-- [x] Keep plugin MIT distinct from models, engine and WebUI.
-- [x] Cover all six recipes with pinned quantizer cards and actual named-upstream
-  license texts; preserve exact retrieval links and metadata.
-- [x] Document Apache/MIT notices, Flash-Next use/business restrictions and
-  Open WebUI deployment/branding terms.
-- [x] Fetch pinned-engine license files and WebUI license/history/notice files.
-- [ ] Resolve the quantizer's missing Flash-Next LICENSE link and historical
-  base-revision provenance **before claiming a complete GGUF redistribution audit**.
-- [ ] Release owner reviews Flash-Next commercial/affiliate applicability and
-  makes its separate terms apparent to users; do not advertise every recipe as
-  unrestricted Apache/MIT.
-- [ ] Verify the exact publication payload remains plugin-only and includes the
-  plugin LICENSE. If upstream code, weights or binaries are added, perform an
-  artifact-specific notices/dependency review; this checklist does not clear them.
-
-Scratch evidence (not part of the plugin distribution):
-`$TMPDIR/omastrix-license-audit-bpxz1osr/`. `checklist.json` contains the
-Python-counted per-recipe results; `retrieval.json` records URLs, status/errors,
-byte counts and SHA-256 digests; `ledger.json` stores citation IDs and verified
-verbatim quotations. `*-README.md`, `*-base-LICENSE`, `*-api.json`,
-`engine-*` and `webui-*` retain the fetched text/metadata. All six upstream cards
-are retained even where only the license is cited here. Scratch retention is
-not permanent; archive reviewed evidence separately if required for release.
+The plugin's MIT license does not cover separately obtained components or
+models. Resolve missing notices and quantization provenance before redistributing
+GGUFs. Assess Flash-Next's commercial/affiliate terms before commercial use.
+If upstream code, weights or binaries are bundled, inventory the actual artifacts
+and preserve all applicable notices. This summary is not legal clearance.
 
 ## Sources
 

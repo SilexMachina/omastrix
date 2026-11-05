@@ -12,6 +12,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import library
+import dependencies
 import webui
 
 # Stock TTM pages_limit is about 16.3M pages (~62 GiB). A ceiling at or under
@@ -355,6 +356,8 @@ def newest_halo_tag():
             ["git", "ls-remote", "--tags", "https://github.com/halo-box/strix-llama.cpp.git"],
             capture_output=True, text=True, timeout=25, check=False,
         )
+    except FileNotFoundError:
+        return newest_halo_tag_without_git()
     except (OSError, subprocess.TimeoutExpired):
         return None
     if remote.returncode != 0:
@@ -373,6 +376,44 @@ def newest_halo_tag():
     name = max(tags, key=lambda name: int(name[1:]))
     # Annotated tag object IDs are not commits: use their peeled target.
     return int(name[1:]), name, peeled.get(name, tags[name])
+
+
+def newest_halo_tag_without_git():
+    """Resolve the same immutable selection when git is itself a prerequisite."""
+    import urllib.request
+    base = "https://api.github.com/repos/halo-box/strix-llama.cpp/git/"
+    def fetch(endpoint):
+        with urllib.request.urlopen(base + endpoint, timeout=25) as response:
+            return json.load(response)
+    try:
+        refs = fetch("matching-refs/tags/b")
+        if not isinstance(refs, list):
+            return None
+        tags = {}
+        for row in refs:
+            if not isinstance(row, dict):
+                continue
+            match = re.fullmatch(r"refs/tags/(b[0-9]+)", row.get("ref", ""))
+            obj = row.get("object")
+            if match and isinstance(obj, dict):
+                tags[match[1]] = obj
+        if not tags:
+            return None
+        name = max(tags, key=lambda tag: int(tag[1:]))
+        obj = tags[name]
+        # Peel annotated tags without ever accepting an API-provided URL.
+        for _ in range(5):
+            sha = obj.get("sha")
+            if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                return None
+            if obj.get("type") == "commit":
+                return int(name[1:]), name, sha
+            if obj.get("type") != "tag":
+                return None
+            obj = fetch("tags/" + sha).get("object", {})
+        return None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def systemctl(*args):
@@ -418,7 +459,8 @@ def engine_info():
         "build": build,
         "commit": text_field(record, "commit"),
         "pin": text_field(pin, "commit"),
-        "state": state if installed else "not_installed",
+        "state": "installing" if is_updating and not installed else (state if installed else "not_installed"),
+        "install_phase": text_field(updating, "phase") if is_updating else "",
         "autostart": enabled_text == "enabled",
         "listening": listening,
         "ui": paths["ui"],
@@ -479,9 +521,11 @@ def engine_action(verb, arg):
         print(json.dumps(info))
         return 0
     if verb == "engine-install":
-        result = start_engine_install()
+        result = start_engine_install(confirm=arg == "--confirm")
         print(json.dumps(result))
         return 0 if result.get("success") is True else 1
+    if verb == "engine-dependencies-run":
+        return engine_update_run(arg, first_install=True, install_dependencies=True)
     if verb == "engine-install-run":
         return engine_update_run(arg, first_install=True)
     if verb == "engine-update":
@@ -493,7 +537,7 @@ def engine_action(verb, arg):
 
 
 @library.serialized("engine", error_state=lambda: engine_paths()["update"])
-def start_engine_install():
+def start_engine_install(confirm=False):
     info = engine_info()
     if info.get("installed"):
         return {"success": True, "message": "strix-llama.cpp is already installed."}
@@ -504,6 +548,9 @@ def start_engine_install():
         return {"success": False, "error": "Stop strix-llama.cpp before installing."}
     if pid_alive(read_json(paths["update"]).get("pid")):
         return {"success": True, "message": "Engine installation is already running."}
+    packages = dependencies.missing("engine", strix=host_probe()[-1])
+    if packages and not confirm:
+        return dependencies.approval(packages)
     latest = newest_halo_tag()
     if latest is None:
         return {"success": False, "error": "Could not resolve the newest published strix-llama.cpp build; installation was not started."}
@@ -512,11 +559,12 @@ def start_engine_install():
             or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)):
         return {"success": False, "error": "Invalid published engine selection; installation was not started."}
     os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
-    selection = {'pid': 0, 'error': '', 'build': number, 'tag': name, 'commit': commit}
+    selection = {'pid': 0, 'error': '', 'build': number, 'tag': name, 'commit': commit,
+                 'phase': 'dependencies' if packages else 'build'}
     library.atomic_json(paths['update'], selection)
     with open(paths["update_log"], "ab") as log:
         proc = subprocess.Popen(
-            [os.path.abspath(__file__), "engine-install-run", commit],
+            [os.path.abspath(__file__), "engine-dependencies-run" if packages else "engine-install-run", commit],
             start_new_session=True, stdout=log, stderr=subprocess.STDOUT,
         )
     library.atomic_json(paths['update'], {**selection, 'pid': proc.pid})
@@ -557,7 +605,7 @@ def start_engine_update():
     }
 
 
-def engine_update_run(commit, first_install=False):
+def engine_update_run(commit, first_install=False, install_dependencies=False):
     # Own the descriptor so the installer can inherit the same flock instead of
     # reopening (and contending with) its parent's engine lock.
     paths = engine_paths()
@@ -566,7 +614,7 @@ def engine_update_run(commit, first_install=False):
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
         with open(lock_path, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            return engine_update_locked(commit, first_install, lock.fileno())
+            return engine_update_locked(commit, first_install, lock.fileno(), install_dependencies)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         error = str(exc)
         try:
@@ -577,7 +625,7 @@ def engine_update_run(commit, first_install=False):
         return 1
 
 
-def engine_update_locked(commit, first_install, lock_fd):
+def engine_update_locked(commit, first_install, lock_fd, install_dependencies=False):
     if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
         print("engine update needs a commit", file=sys.stderr)
         return 2
@@ -595,8 +643,17 @@ def engine_update_locked(commit, first_install, lock_fd):
     if library.service_state(code, state) not in ("stopped", "failed") and not missing_unit:
         library.atomic_json(paths['update'], {'pid': 0, 'error': 'Stop strix-llama.cpp before installing or updating.'})
         return 1
+    if first_install:
+        if install_dependencies:
+            selection = read_json(paths["update"])
+            library.atomic_json(paths["update"], {**selection, "pid": os.getpid(), "phase": "dependencies", "error": ""})
+            dependencies.install("engine", strix=host_probe()[-1])
+        elif dependencies.missing("engine", strix=host_probe()[-1]):
+            raise ValueError("Engine dependencies require approval; use engine-install --confirm.")
+        selection = read_json(paths["update"])
+        library.atomic_json(paths["update"], {**selection, "pid": os.getpid(), "phase": "build", "error": ""})
     # Public-source builds need process/session paths, not application credentials
-    # or arbitrary agent variables. Keep only the installer's supported inputs.
+    # or unrelated environment variables. Keep only the installer's supported inputs.
     environment_keys = (
         "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
         "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "OMASTRIX_RADV_ICD",
@@ -651,8 +708,8 @@ def main():
         if os.geteuid() != 0:
             os.execvp("pkexec", ["pkexec", os.path.abspath(__file__), "set-gtt", label])
         return write_gtt(label)
-    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check", "engine-install", "engine-install-run", "engine-update", "engine-update-run"):
-        if verb in ("engine-install-run", "engine-update-run") and len(sys.argv) != 3:
+    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check", "engine-install", "engine-install-run", "engine-dependencies-run", "engine-update", "engine-update-run"):
+        if verb in ("engine-install-run", "engine-dependencies-run", "engine-update-run") and len(sys.argv) != 3:
             print("engine worker needs exactly one immutable commit", file=sys.stderr)
             return 2
         arg = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -680,9 +737,9 @@ def main():
     if verb == "webui-access":
         return emit_result(webui.set_access(sys.argv[2] if len(sys.argv) > 2 else "", "--confirm" in sys.argv))
     if verb == "webui-install-run":
-        return webui.install()
+        return webui.install(confirm="--confirm" in sys.argv)
     if verb == "webui-install":
-        return emit_result(webui.start_install())
+        return emit_result(webui.start_install(confirm="--confirm" in sys.argv))
     if verb == "webui-start":
         return emit_result(webui.start())
     if verb == "webui-stop":

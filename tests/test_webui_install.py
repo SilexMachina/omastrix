@@ -18,7 +18,7 @@ class WebuiInstallTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.repo = self.home / "plugin"
         (self.repo / "bin").mkdir(parents=True)
-        for name in ("webui.py", "library.py"):
+        for name in ("webui.py", "library.py", "dependencies.py"):
             shutil.copy2(ROOT / "bin" / name, self.repo / "bin" / name)
         if (ROOT / "webui-pin.json").exists():
             shutil.copy2(ROOT / "webui-pin.json", self.repo / "webui-pin.json")
@@ -39,6 +39,18 @@ if Path(sys.argv[0]).name == "systemctl":
     if "show" in args:
         print(c.get("show_state", "")); sys.exit(c.get("show_code", 0))
     sys.exit(c.get("reload_code", 0))
+if Path(sys.argv[0]).name == "pacman":
+    if args[:2] != ["-Q", "--"]: sys.exit(99)
+    sys.exit(0 if (Path(os.environ["HOME"]) / "registered-uv").exists() else 1)
+if Path(sys.argv[0]).name == "pkexec":
+    if args != ["/usr/bin/omarchy", "pkg", "add", "uv"]: sys.exit(99)
+    if c.get("deny"): sys.exit(126)
+    if not c.get("unregistered"):
+        (Path(os.environ["HOME"]) / "registered-uv").touch()
+        hidden = Path(sys.argv[0]).parent / "hidden-uv"
+        if hidden.exists(): hidden.rename(hidden.parent / "uv")
+    sys.exit(0)
+if args == ["--version"]: print("uv 0.9.0"); sys.exit(0)
 if args[0] == "venv":
     p = Path(args[1]); (p / "bin").mkdir(parents=True)
     (p / "pyvenv.cfg").write_text("version = 3.11.0\\n")
@@ -61,7 +73,7 @@ if args[:2] == ["pip", "install"]:
 if args[:2] == ["pip", "check"]: sys.exit(c.get("check_code", 0))
 sys.exit(99)
 '''
-        for name in ("uv", "systemctl"):
+        for name in ("uv", "systemctl", "pacman", "pkexec"):
             path = self.tools / name
             path.write_text(stub)
             path.chmod(0o755)
@@ -274,6 +286,51 @@ sys.exit(99)
         out = self.run_worker(action="0 if webui.status()['state'] == 'unavailable' else 1")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertFalse((self.home / "executed-foreign").exists())
+
+    def test_missing_uv_launcher_returns_package_approval_without_installing(self):
+        (self.tools / "uv").rename(self.tools / "hidden-uv")
+        out = self.run_worker(action="(print(__import__('json').dumps(webui.start_install())), 0)[1]")
+        result = json.loads(out.stdout)
+        self.assertTrue(result["needs_confirm"])
+        self.assertEqual(result["confirmation"], "dependencies")
+        self.assertEqual(result["packages"], ["uv"])
+        self.assertFalse(any(c[0] == "pkexec" for c in self.commands()))
+        self.assertFalse(self.prefix.exists())
+
+    def test_confirmed_uv_install_continues_original_webui_install(self):
+        (self.tools / "uv").rename(self.tools / "hidden-uv")
+        out = self.run_worker(action="webui.install(confirm=True)")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue((self.prefix / "venv/bin/open-webui").exists())
+        self.assertTrue(any(c[0] == "pkexec" for c in self.commands()))
+        self.assertEqual(self.state()["pid"], 0)
+        self.assertEqual(self.state()["error"], "")
+
+    def test_uv_denial_and_unregistered_success_never_build_venv(self):
+        (self.tools / "uv").rename(self.tools / "hidden-uv")
+        for failure in ({"deny": True}, {"unregistered": True}):
+            with self.subTest(failure=failure):
+                self.settings = failure
+                out = self.run_worker(action="webui.install(confirm=True)")
+                self.assertNotEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertFalse(self.prefix.exists())
+                self.assertEqual(self.state()["pid"], 0)
+                self.assertIn("dependencies", self.state()["error"])
+
+    def test_unusable_uv_requests_dependency_approval(self):
+        uv = self.tools / "uv"
+        uv.write_text("#!" + sys.executable + "\nraise SystemExit(1)\n")
+        out = self.run_worker(action="(print(__import__('json').dumps(webui.start_install())), 0)[1]")
+        self.assertEqual(json.loads(out.stdout)["packages"], ["uv"])
+        self.assertFalse(self.prefix.exists())
+
+    def test_unrelated_application_uv_is_not_discovered(self):
+        uv = self.home / ".unrelated-app/bin/uv"
+        uv.parent.mkdir(parents=True)
+        (self.tools / "uv").rename(uv)
+        out = self.run_worker(action="0 if not webui.find_uv() else 1")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.commands(), [])
 
     def test_missing_uv_worker_records_failure(self):
         (self.tools / "uv").unlink()

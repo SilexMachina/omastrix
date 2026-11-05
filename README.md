@@ -12,8 +12,7 @@ and Open WebUI in one bar panel.
 [manifest.json](manifest.json), with changes in [CHANGELOG.md](CHANGELOG.md). Fresh-machine,
 reboot/recovery and full catalog acceptance are still in progress. Keep a
 recovery path before changing boot/GTT settings. See the
-[preview readiness report](docs/publication-audit.md) and
-[stable-release checklist](docs/releasing.md).
+[user guide](docs/user-guide.md) for setup limitations and safe operation.
 
 Inference requires a supported AMD Strix Halo iGPU, amdgpu and Vulkan/RADV.
 Other Omarchy machines can install the same plugin, build the engine, use
@@ -33,17 +32,16 @@ Choose a bar placement, then open OmaStrix. Installing the plugin does not
 install the engine/WebUI, download weights, start a service, or change GTT.
 Those are explicit panel actions.
 
-Before building the native engine, install the build prerequisites:
+Choose **Install** beside the component you want. If system packages are
+missing, OmaStrix lists them and asks for confirmation. After the platform's
+administrator authorization prompt, it installs those packages through Omarchy
+and continues component setup automatically. Cancelling leaves packages unchanged.
 
-```sh
-omarchy pkg add base-devel git cmake ninja vulkan-headers vulkan-tools spirv-headers shaderc
-```
-
-Strix Halo inference also requires Mesa's `vulkan-radeon` driver. Optional
-Open WebUI installation requires `uv` (`omarchy pkg add uv` if missing). Engine
-installation compiles from source and can take several minutes. No root plugin
-process is required; installing system dependencies and changing boot settings
-use the platform's authorization prompts.
+The engine needs C/C++ build tools, CMake, Ninja and Vulkan development tools.
+The `vulkan-radeon` runtime driver is included only on supported Strix Halo
+hardware. Open WebUI needs `uv`. Engine installation compiles from source and
+can take several minutes. The panel and builds run as your normal user;
+only package installation and boot-setting changes request administrator rights.
 
 ### Update or remove
 
@@ -89,11 +87,9 @@ access. OmaStrix provides no TLS or firewall policy.
 This repository is the canonical home for project documentation.
 
 - [User guide](docs/user-guide.md): setup, controls, storage, troubleshooting.
-- [Design](DESIGN.md): architecture and UI/safety contract.
-- [Development](docs/development.md): tests and recipe evidence.
-- [Releases](docs/releasing.md), [changelog](CHANGELOG.md).
+- [Changelog](CHANGELOG.md).
 - [Component and model licenses](docs/licenses.md).
-- [Contributing](CONTRIBUTING.md), [security](SECURITY.md), [agent rules](AGENTS.md).
+- [Contributing](CONTRIBUTING.md), [security](SECURITY.md).
 
 Install ID: `silexmachina.omastrix`. To open an enabled panel from the terminal:
 

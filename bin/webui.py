@@ -1,7 +1,7 @@
 """Open WebUI as an OmaStrix user program.
 
-The copy under ~/.local/share/open-webui and ~/.local/bin/open-webui-serve is a
-hand install. This module does not start it, stop it, or read its secret.
+Manages only the OmaStrix Open WebUI installation. Other installations are
+outside this module's scope.
 """
 
 import functools
@@ -17,6 +17,7 @@ import time
 import uuid
 
 import library
+import dependencies
 
 UNIT = "omastrix-webui.service"
 PORT = 3000
@@ -143,15 +144,17 @@ def install_state_path():
 
 
 def find_uv():
-    found = shutil.which("uv")
-    if found:
-        return found
-    for path in (
-        os.path.join(home(), ".local/bin/uv"),
-        os.path.join(home(), ".hermes/bin/uv"),
-    ):
-        if os.access(path, os.X_OK):
-            return path
+    candidates = [shutil.which("uv"), os.path.join(home(), ".local/bin/uv")]
+    for path in dict.fromkeys(candidates):
+        if not path or not os.path.isfile(path) or not os.access(path, os.X_OK):
+            continue
+        try:
+            result = subprocess.run([path, "--version"], capture_output=True, text=True,
+                                    timeout=5, check=False)
+            if result.returncode == 0 and (result.stdout or "").startswith("uv "):
+                return path
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     return ""
 
 
@@ -378,6 +381,7 @@ def status():
         "installed": installed,
         "running": state == "running",
         "state": state,
+        "install_phase": install.get("phase", "") if install.get("running") else "",
         "version": version,
         "latest_version": read_json(check_path()).get("latest") or "",
         "update_available": update_available(installed, version),
@@ -587,7 +591,7 @@ def build_venv(uv, version, logfile):
 
 
 @serialized(wait=True, worker=True, job="install")
-def install():
+def install(confirm=False):
     existing = current_venv()
     require_stopped()
     version = version_of(webui_bin()) if existing else INITIAL_VERSION
@@ -597,8 +601,13 @@ def install():
         print(json.dumps({"success": True, "message": "Open WebUI is already installed."}))
         return 0
     uv = find_uv()
+    if not uv and confirm:
+        library.atomic_json(install_state_path(), {"pid": os.getpid(), "error": "", "phase": "dependencies"})
+        dependencies.install("webui")
+        uv = find_uv()
     if not uv:
-        raise ValueError("Open WebUI installation requires uv.")
+        raise ValueError("Open WebUI installation requires uv; dependencies need approval or uv is unusable.")
+    library.atomic_json(install_state_path(), {"pid": os.getpid(), "error": "", "phase": "build"})
     # A legacy venv cannot be relocated and reused: entry-point shebangs and
     # activation scripts contain its absolute original path. Rebuild the SAME
     # distribution version, verify dependencies, then preserve the old tree only
@@ -610,7 +619,7 @@ def install():
 
 
 @serialized(job="install")
-def start_install():
+def start_install(confirm=False):
     existing = current_venv()
     pointer = os.path.join(prefix(), "venv")
     if existing:
@@ -622,20 +631,20 @@ def start_install():
     state = read_install_state()
     if state.get("running"):
         return {"success": True, "message": "Open WebUI install is already running."}
-    if not find_uv():
-        return {
-            "success": False,
-            "error": "Open WebUI installation requires uv.",
-        }
+    require_stopped()
+    needs_uv = not find_uv()
+    if needs_uv and not confirm:
+        return dependencies.approval(["uv"])
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(state_dir(), "webui-install.log"), "ab") as log:
         proc = subprocess.Popen(
-            [os.path.join(root, "bin/omastrix"), "webui-install-run"],
+            [os.path.join(root, "bin/omastrix"), "webui-install-run"] + (["--confirm"] if confirm else []),
             start_new_session=True,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-    library.atomic_json(install_state_path(), {'pid': proc.pid, 'error': ''})
+    library.atomic_json(install_state_path(), {'pid': proc.pid, 'error': '',
+                                                 'phase': 'dependencies' if needs_uv else 'build'})
     return {"success": True, "message": "Installing Open WebUI."}
 
 

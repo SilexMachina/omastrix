@@ -434,6 +434,16 @@ class HostSafetyTests(IsolatedBackend):
 
 
 class EngineInstallTests(IsolatedBackend):
+    def setUp(self):
+        super().setUp()
+        for module, target, value in (
+            (backend, "host_probe", ("", {}, "", "", "", True)),
+            (backend.dependencies, "missing", []),
+        ):
+            patcher = mock.patch.object(module, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_engine_start_cannot_race_an_install_worker(self):
         nested = []
         def service(*args):
@@ -644,9 +654,15 @@ class WebuiSafetyTests(IsolatedBackend):
 
     def test_install_messages_name_missing_dependency_and_omit_reassurances(self):
         with mock.patch.object(webui, "find_uv", return_value=""), \
+             mock.patch.object(webui, "observed_service_state", return_value="absent"), \
              mock.patch.object(os, "access", return_value=False):
-            self.assertEqual(webui.start_install()["error"], "Open WebUI installation requires uv.")
+            result = webui.start_install()
+            self.assertFalse(result["success"])
+            self.assertTrue(result["needs_confirm"])
+            self.assertEqual(result["packages"], ["uv"])
+            self.assertIn("Administrator approval", result["error"])
         with mock.patch.object(webui, "find_uv", return_value="/mock/uv"), \
+             mock.patch.object(webui, "observed_service_state", return_value="absent"), \
              mock.patch.object(os, "access", return_value=False), \
              mock.patch("subprocess.Popen", return_value=mock.Mock(pid=12345)):
             self.assertEqual(webui.start_install()["message"], "Installing Open WebUI.")
@@ -668,6 +684,7 @@ class WebuiSafetyTests(IsolatedBackend):
                 nested[0] = webui.start_install()
             return mock.Mock(pid=12345)
         with mock.patch.object(webui, "find_uv", return_value="/mock/uv"), \
+             mock.patch.object(webui, "observed_service_state", return_value="absent"), \
              mock.patch.object(os, "access", return_value=False), \
              mock.patch("subprocess.Popen", side_effect=spawn) as launch:
             self.assertTrue(webui.start_install()["success"])
