@@ -121,6 +121,15 @@ sys.exit(0)
     def assert_no_build(self):
         self.assertFalse(any(row[0] in ("git", "cmake") for row in self.commands()))
 
+    def test_explicit_first_install_builds_selected_commit_not_pin(self):
+        selected = "b" * 40
+        self.settings["actual_commit"] = selected
+        result = self.run_installer("--first-install", selected)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads((self.home / ".config/omastrix/engine.json").read_text())
+        self.assertEqual(record["commit"], selected)
+        self.assertTrue(any("fetch" in row and row[-1] == selected for row in self.commands()))
+
     def test_unsupported_host_installs_native_build_without_radv_acceptance(self):
         (self.device / "uevent").write_text("DRIVER=i915\nPCI_ID=8086:1234\n")
         self.extra_env["OMASTRIX_RADV_ICD"] = str(self.home / "missing-icd.json")
@@ -225,6 +234,28 @@ sys.exit(0)
         self.assertIn("stopped", result.stderr.lower())
 
 
+    def test_explicit_first_install_protects_existing_newer_or_broken_files(self):
+        for relative in (".config/omastrix/engine.json", ".local/share/omastrix/bin/llama-server"):
+            for broken in (False, True):
+                with self.subTest(relative=relative, broken=broken):
+                    path = self.home / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if broken:
+                        path.symlink_to(self.home / "missing-newer-engine")
+                    else:
+                        path.write_text('{"version": "build 99999", "commit": "newer"}')
+                    try:
+                        result = self.run_installer("--first-install", "a" * 40)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("already installed", result.stderr.lower())
+                        self.assert_no_build()
+                        if broken:
+                            self.assertTrue(path.is_symlink())
+                        else:
+                            self.assertIn("99999", path.read_text())
+                    finally:
+                        path.unlink()
+
     def test_first_install_refuses_to_replace_an_installed_engine(self):
         record = self.home / ".config/omastrix/engine.json"
         record.parent.mkdir(parents=True)
@@ -252,7 +283,10 @@ sys.exit(0)
         for name in ("omastrix", "library.py", "webui.py"):
             shutil.copy2(ROOT / "bin" / name, self.repo / "bin" / name)
         self.control.write_text(json.dumps(self.settings))
-        for verb, args in (("engine-install-run", []), ("engine-update-run", [PIN["commit"]])):
+        selected = "b" * 40
+        self.settings["actual_commit"] = selected
+        self.control.write_text(json.dumps(self.settings))
+        for verb, args in (("engine-install-run", [selected]), ("engine-update-run", [selected])):
             with self.subTest(verb=verb):
                 result = subprocess.run(
                     [sys.executable, str(self.repo / "bin/omastrix"), verb, *args],
@@ -265,6 +299,8 @@ sys.exit(0)
                 state = json.loads((self.home / ".local/state/omastrix/engine-update.json").read_text())
                 self.assertEqual(state["pid"], 0)
                 self.assertEqual(state["error"], "")
+                record = json.loads((self.home / ".config/omastrix/engine.json").read_text())
+                self.assertEqual(record["commit"], selected)
                 self.assertIn("INSTALL_OK", result.stdout)
 
     def test_python_engine_operation_blocks_standalone_installer(self):
@@ -459,7 +495,11 @@ sys.exit(0)
 
 
     def test_invalid_update_arguments_are_refused_before_build(self):
-        for arguments in (("",), ("main",), ("--help",), ("A" * 40,), (PIN["commit"], "extra")):
+        for arguments in (("",), ("main",), ("--help",), ("A" * 40,), (PIN["commit"], "extra"),
+                          ("--first-install",), ("--first-install", ""),
+                          ("--first-install", "main"), ("--first-install", "b12345"),
+                          ("--first-install", "A" * 40), ("--first-install", "a" * 39),
+                          ("--first-install", PIN["commit"], "extra")):
             with self.subTest(arguments=arguments):
                 result = self.run_installer(*arguments)
                 self.assertNotEqual(result.returncode, 0)

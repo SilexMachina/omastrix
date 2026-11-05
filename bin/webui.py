@@ -344,6 +344,17 @@ def ensure_layout():
     write_unit()
 
 
+def observed_service_state():
+    code, text = systemctl("is-active", UNIT)
+    state = library.service_state(code, text)
+    if state == "unavailable" and code == 4 and text in ("inactive", "unknown"):
+        show_code, properties = systemctl("show", UNIT, "--property=LoadState", "--property=ActiveState")
+        if show_code == 0 and sorted(properties.splitlines()) == [
+                "ActiveState=inactive", "LoadState=not-found"]:
+            return "absent"
+    return state
+
+
 def status():
     try:
         safe_layout()
@@ -354,12 +365,13 @@ def status():
                 "latest_version": "", "update_available": False, "updating": False,
                 "url": "http://127.0.0.1:3000", "error": str(exc)}
     install = read_install_state()
-    active, active_text = systemctl("is-active", UNIT)
-    state = library.service_state(active, active_text)
-    if install.get("running") and state in ("stopped", "failed"):
+    state = observed_service_state()
+    if install.get("running") and state in ("stopped", "failed", "absent"):
         state = "installing"
-    elif not installed and state in ("stopped", "failed"):
+    elif not installed and state in ("stopped", "failed", "absent"):
         state = "not_installed"
+    elif state == "absent":
+        state = "unavailable"
     version = version_of(webui_bin()) if installed else ""
     return {
         **access,
@@ -444,8 +456,7 @@ def current_venv():
 
 
 def require_stopped():
-    code, text = systemctl("is-active", UNIT)
-    if library.service_state(code, text) not in ("stopped", "failed"):
+    if observed_service_state() not in ("stopped", "failed", "absent"):
         raise ValueError("Stop Open WebUI before installation or updating; service state must be known stopped.")
 
 

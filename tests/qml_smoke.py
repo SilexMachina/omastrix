@@ -508,6 +508,8 @@ with (base / "backend-calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\\n")
 if args == ["snapshot"]:
     print((base / "snapshot.json").read_text())
+elif args == ["webui-install"]:
+    print(json.dumps(dict(success=True)))
 elif args == ["library-download", "fixture-remote"]:
     print(json.dumps(dict(success=True)))
 elif args == ["webui-access", "network"]:
@@ -588,6 +590,15 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
         plugin.payload = Object.assign({}, original, {engine: {installed: false, state: "not_installed"}})
         wait(50)
         verify(controls("Install").some(function(b) { return b.actionContext === "strix-llama.cpp" && b.enabled }), "engine install enabled")
+        plugin.payload = Object.assign({}, original, {webui: {installed: false, state: "not_installed"}})
+        wait(50)
+        var webuiInstall = controls("Install").filter(function(b) { return b.actionContext === "Open WebUI" })[0]
+        verify(!!webuiInstall && webuiInstall.enabled, "Fresh WebUI Install is enabled on unsupported hardware")
+        reveal(webuiInstall)
+        mouseClick(webuiInstall, webuiInstall.width / 2, webuiInstall.height / 2)
+        tryVerify(function() { return !plugin.busy && plugin.actionArgs[0] === "webui-install" }, 5000)
+        compare(plugin.messageFor("webui"), "")
+        wait(150)
         plugin.payload = original
         plugin.smokeScroll.contentY = 0
         wait(50)
@@ -624,7 +635,7 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
     print(f"=== {name} exit={code} ===\n{output}")
     callfile = plugin / "backend-calls.jsonl"
     calls = [json.loads(line) for line in callfile.read_text().splitlines()] if callfile.exists() else []
-    allowed = [["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
+    allowed = [["webui-install"], ["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
     unexpected = [call for call in calls if call not in allowed]
     platform_warnings = [line for line in output.splitlines() if line.strip() == "WARN: This plugin does not support setting window masks"]
     bad_log = [line for line in output.splitlines() if re.search(r"\b(?:WARN|ERROR|FAIL!)\b", line) and line not in platform_warnings]

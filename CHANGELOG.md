@@ -5,6 +5,10 @@ manifest versions `0.1.0`, `0.2.0` and `0.3.0` identified internal development
 cuts, not published releases; their commits remain in Git history. The first
 planned release is 0.5.0.
 
+## [0.5.0-preview.2] - Unreleased
+
+- Fresh engine installs select the newest published Halo build; enable WebUI installation when its service has not been created yet.
+
 ## [0.5.0-preview.1] - 2026-11-05
 
 First public preview for testing on Omarchy. Stable-release hardware and recovery

@@ -20,7 +20,7 @@ workflow from a verified fresh install.
 | `bin/webui.py` | Separate OmaStrix Open WebUI install and service lifecycle. |
 | `bin/omastrix-engine-install` | Build the approved engine commit into the user's profile. |
 | `catalog.json` | Shipped recipes, paths, expected sizes/hashes, context and serve flags. |
-| `engine-pin.json` | First-install engine source and commit, independent of plugin version. |
+| `engine-pin.json` | Reproducible engine source/baseline commit, independent of plugin version. |
 | `manifest.json` | Plugin identity, settings, and single source of current version. |
 
 The backend owns host probes, fit decisions, file operations, and service/API
@@ -37,9 +37,11 @@ manifest, not a separate hardcoded UI version.
 - OmaStrix's full-path wrapper starts a loopback router on `127.0.0.1:8080`,
   `--models-max 1`, explicit presets, and `--offline`; no model path at start.
   Presets use `load-mode = none`. Logon start defaults off; no linger.
-- First install uses `engine-pin.json`, never floating `main`. An explicit
-  update targets published Halo `b`-number tags. A plugin version bump does not
-  change the engine pin or downgrade an installed newer build.
+- Normal Install and Update resolve the newest published Halo `b`-number tag
+  and compile its exact commit, never floating `main`. First install does not
+  silently fall back to a stale baseline if discovery fails. Preserve installed
+  engines unless Update is explicitly selected. `engine-pin.json` remains an
+  unchanged reproducible baseline for development.
 - Build/install/update must leave services stopped. Require the user to stop a
   running service before replacement; no hidden stop, start, or restart.
 - RADV environment applies only to supported OmaStrix engine processes.

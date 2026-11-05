@@ -22,8 +22,10 @@ there skips Strix GPU acceptance and does not claim inference support.
 - Optional Open WebUI: `uv` and network access to resolve its Python packages.
 - GTT configuration: Limine tooling, `pkexec`, and a bootable recovery path.
 
-Engine installation builds the commit in `engine-pin.json`. Existing newer
-engine installations are preserved. Optional Open WebUI first install selects
+Engine Install checks the newest published Halo build and compiles that exact
+commit. Discovery failures are reported without installing an older baseline.
+Existing installations are preserved until Update is explicitly selected.
+`engine-pin.json` remains a reproducible development baseline. Optional Open WebUI first install selects
 `open-webui==0.13.0` on Python 3.11; Check/Update is explicit and independent of
 the plugin version. Node.js is needed for development tests.
 

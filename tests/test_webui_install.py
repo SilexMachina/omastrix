@@ -36,6 +36,8 @@ with open(os.environ["COMMAND_LOG"], "a") as out: out.write(json.dumps([Path(sys
 if Path(sys.argv[0]).name == "systemctl":
     if "is-active" in args:
         print(c.get("state", "inactive")); sys.exit(c.get("state_code", 3))
+    if "show" in args:
+        print(c.get("show_state", "")); sys.exit(c.get("show_code", 0))
     sys.exit(c.get("reload_code", 0))
 if args[0] == "venv":
     p = Path(args[1]); (p / "bin").mkdir(parents=True)
@@ -103,6 +105,16 @@ sys.exit(99)
         self.assertTrue(legacy.is_symlink())
         self.assertEqual((legacy / "version").read_text(), "0.14.0")
         self.assertTrue(any((p / "version").read_text() == "0.13.0" for p in (self.prefix / "venvs").iterdir()))
+
+    def test_missing_unit_first_install_completes_without_starting_service(self):
+        self.settings = {"state": "inactive", "state_code": 4,
+                         "show_state": "LoadState=not-found\nActiveState=inactive"}
+        out = self.run_worker()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue((self.prefix / "venv/bin/open-webui").is_file())
+        self.assertEqual(self.state()["pid"], 0)
+        self.assertEqual(self.state()["error"], "")
+        self.assertFalse(any(command[0] == "systemctl" and "start" in command for command in self.commands()))
 
     def test_install_refuses_running_or_unknown_service_before_build(self):
         for state, code in (("active", 0), ("unknown", 4), ("inactive", 1), ("activating", 0)):

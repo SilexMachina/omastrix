@@ -16,8 +16,10 @@ maintain a competing spec in external agent notes.
 - Never install, update, download, load, unload, delete, change GTT, reboot, or
   start/stop/restart a service merely to verify an edit. Obtain authorization for
   those actions. A restart loses the loaded model. Do not enable linger.
-- Keep `engine-pin.json` unchanged unless a new first-install pin is approved.
-  Never downgrade an existing engine to that pin. Use the OmaStrix full-path
+- Normal engine Install resolves the newest published Halo build tag, then builds
+  that exact commit. Fail clearly if discovery fails; do not silently install an
+  older pin. Keep `engine-pin.json` as the reproducible baseline, unchanged unless
+  approved. Never downgrade an existing installation. Use the OmaStrix full-path
   wrapper, not a `PATH` binary or another engine checkout.
 - Keep RADV settings process-local in `~/.config/omastrix/llama.env`; never export
   `VK_DRIVER_FILES` globally. Keep llama on `127.0.0.1:8080`.

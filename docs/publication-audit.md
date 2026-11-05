@@ -71,6 +71,23 @@ Earlier versions 0.1.0–0.3.0 were internal development cuts. Versioned unrelea
 notes began at 0.4.0-dev.1; no retroactive releases/tags are claimed. The first
 public tag is `v0.5.0-preview.1`. Git history is retained without rewriting.
 
+## Preview.2 follow-up
+
+Testing reported by the maintainer on a second, unsupported Omarchy machine
+confirmed plugin installation, engine compilation after manually adding build
+dependencies, engine update, and model download/deletion. Inference remained
+correctly unavailable. Hardware/OS specifics and fresh WebUI browser acceptance
+are not yet recorded.
+
+Two issues from that test prompted targeted fixes: normal first installation now
+resolves the newest published Halo build to an exact commit, and a confirmed
+missing WebUI unit is treated as installable. Missing-unit discovery distinguishes
+exact `LoadState=not-found` / `ActiveState=inactive` from a failed user-service bus
+or ambiguous output. The worker accepts that same safe first-install state.
+Dependency installation remains manual in this preview update. The combined
+follow-up suite passes 210 offline tests and 98 native fixture checks. These
+checks do not replace real first-account/browser acceptance on the test machine.
+
 ## Remaining before stable 0.5.0
 
 - Fresh Omarchy/Strix Halo setup, dependency/build acceptance and RADV heap checks.

@@ -356,20 +356,20 @@ def newest_halo_tag():
         return None
     if remote.returncode != 0:
         return None
-    best = None
+    tags, peeled = {}, {}
     for line in (remote.stdout or "").splitlines():
-        if "refs/tags/" not in line or line.endswith("^{}"):
-            continue
         parts = line.split()
-        if len(parts) < 2:
+        if len(parts) != 2:
             continue
-        sha, ref = parts[0], parts[1]
-        name = ref.split("refs/tags/")[-1]
-        if len(name) > 1 and name[0] == "b" and name[1:].isdigit() and re.fullmatch(r"[0-9a-f]{40}", sha):
-            item = (int(name[1:]), name, sha)
-            if best is None or item[0] > best[0]:
-                best = item
-    return best
+        sha, ref = parts
+        match = re.fullmatch(r"refs/tags/(b[0-9]+)(\^\{\})?", ref)
+        if match and re.fullmatch(r"[0-9a-f]{40}", sha):
+            (peeled if match[2] else tags)[match[1]] = sha
+    if not tags:
+        return None
+    name = max(tags, key=lambda name: int(name[1:]))
+    # Annotated tag object IDs are not commits: use their peeled target.
+    return int(name[1:]), name, peeled.get(name, tags[name])
 
 
 def systemctl(*args):
@@ -480,7 +480,7 @@ def engine_action(verb, arg):
         print(json.dumps(result))
         return 0 if result.get("success") is True else 1
     if verb == "engine-install-run":
-        return engine_update_run(read_json(paths["pin"]).get("commit") or "", first_install=True)
+        return engine_update_run(arg, first_install=True)
     if verb == "engine-update":
         return emit_result(start_engine_update())
     if verb == "engine-update-run":
@@ -501,14 +501,23 @@ def start_engine_install():
         return {"success": False, "error": "Stop strix-llama.cpp before installing."}
     if pid_alive(read_json(paths["update"]).get("pid")):
         return {"success": True, "message": "Engine installation is already running."}
+    latest = newest_halo_tag()
+    if latest is None:
+        return {"success": False, "error": "Could not resolve the newest published strix-llama.cpp build; installation was not started."}
+    number, name, commit = latest
+    if (type(number) is not int or number < 0 or name != "b%s" % number
+            or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+        return {"success": False, "error": "Invalid published engine selection; installation was not started."}
     os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
+    selection = {'pid': 0, 'error': '', 'build': number, 'tag': name, 'commit': commit}
+    library.atomic_json(paths['update'], selection)
     with open(paths["update_log"], "ab") as log:
         proc = subprocess.Popen(
-            [os.path.abspath(__file__), "engine-install-run"],
+            [os.path.abspath(__file__), "engine-install-run", commit],
             start_new_session=True, stdout=log, stderr=subprocess.STDOUT,
         )
-    library.atomic_json(paths['update'], {'pid': proc.pid, 'error': ''})
-    return {"success": True, "message": "Installing strix-llama.cpp."}
+    library.atomic_json(paths['update'], {**selection, 'pid': proc.pid})
+    return {"success": True, "message": "Installing strix-llama.cpp build %s." % number}
 
 
 @library.serialized("engine", error_state=lambda: engine_paths()["update"])
@@ -593,10 +602,13 @@ def engine_update_locked(commit, first_install, lock_fd):
     environment = {key: os.environ[key] for key in environment_keys if key in os.environ}
     environment["OMASTRIX_ENGINE_LOCK_FD"] = str(lock_fd)
     code = subprocess.call(
-        [paths["installer"]] + ([] if first_install else [commit]),
+        [paths["installer"]] + (["--first-install", commit] if first_install else [commit]),
         pass_fds=(lock_fd,), env=environment,
     )
+    selection = read_json(paths["update"])
+    metadata = {key: selection[key] for key in ("build", "tag") if key in selection} if selection.get("commit") == commit else {}
     library.atomic_json(paths["update"], {
+        **metadata,
         "pid": 0,
         "error": "" if code == 0 else "Engine installation failed. See ~/.local/state/omastrix/engine-update.log",
         "commit": commit,
@@ -631,6 +643,9 @@ def main():
             os.execvp("pkexec", ["pkexec", os.path.abspath(__file__), "set-gtt", label])
         return write_gtt(label)
     if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check", "engine-install", "engine-install-run", "engine-update", "engine-update-run"):
+        if verb in ("engine-install-run", "engine-update-run") and len(sys.argv) != 3:
+            print("engine worker needs exactly one immutable commit", file=sys.stderr)
+            return 2
         arg = sys.argv[2] if len(sys.argv) > 2 else ""
         return engine_action(verb, arg)
     if verb == "library-fetch":

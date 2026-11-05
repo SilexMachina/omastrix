@@ -125,8 +125,10 @@ appropriate review before claiming unrestricted commercial availability.
 
 ## Engine: pinned fork, separate upstream notices
 
-[engine-pin.json](../engine-pin.json) selects
+The reproducible baseline in [engine-pin.json](../engine-pin.json) is
 `halo-box/strix-llama.cpp@69946438aa2c432ba365e40bec35c38f6e1de5bb`.
+Normal engine installation now selects the newest published Halo build; the
+following license review refers to this recorded baseline.
 Its root license is **MIT**, **Copyright (c) 2023–2026 The ggml authors**;
 copies/substantial portions must include that copyright and permission notice.[20]
 

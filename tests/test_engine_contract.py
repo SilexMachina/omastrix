@@ -15,6 +15,63 @@ class EngineContractTests(IsolatedBackend):
         probe = mock.patch.object(backend, "gpu_devices", return_value=[])
         probe.start()
         self.addCleanup(probe.stop)
+        self.real_lookup = backend.newest_halo_tag
+        lookup = mock.patch.object(backend, "newest_halo_tag", return_value=(12345, "b12345", "a" * 40))
+        lookup.start()
+        self.addCleanup(lookup.stop)
+
+    def test_install_resolves_and_records_latest_immutable_selection_before_spawn(self):
+        selection = (12345, "b12345", "a" * 40)
+        state = Path(backend.engine_paths()["update"])
+        def spawn_worker(args, **kwargs):
+            saved = json.loads(state.read_text())
+            self.assertEqual((saved["build"], saved["tag"], saved["commit"]), selection)
+            self.assertEqual(args[1:], ["engine-install-run", selection[2]])
+            return mock.Mock(pid=12345)
+        with mock.patch.object(backend, "engine_info", return_value={"state": "not_installed"}), \
+             mock.patch.object(backend, "newest_halo_tag", return_value=selection) as lookup, \
+             mock.patch("subprocess.Popen", side_effect=spawn_worker):
+            self.assertTrue(backend.start_engine_install()["success"])
+        lookup.assert_called_once()
+        self.assertEqual(json.loads(state.read_text())["commit"], selection[2])
+
+    def test_install_lookup_failure_never_spawns_or_uses_cached_pin(self):
+        for selection in (None, (12345, "b12345", "main")):
+            with self.subTest(selection=selection), \
+                 mock.patch.object(backend, "engine_info", return_value={"state": "not_installed"}), \
+                 mock.patch.object(backend, "newest_halo_tag", return_value=selection), \
+                 mock.patch("subprocess.Popen", return_value=mock.Mock(pid=12345)) as spawn:
+                self.assertFalse(backend.start_engine_install()["success"])
+                spawn.assert_not_called()
+
+    def test_direct_install_worker_requires_and_preserves_immutable_commit(self):
+        with mock.patch.object(backend, "engine_update_run", return_value=0) as worker:
+            self.assertEqual(backend.engine_action("engine-install-run", "b" * 40), 0)
+            worker.assert_called_once_with("b" * 40, first_install=True)
+
+    def test_install_network_failure_or_timeout_does_not_spawn(self):
+        cached = Path(backend.engine_paths()["check"])
+        cached.parent.mkdir(parents=True)
+        cached.write_text(json.dumps({"latest_build": 99999, "latest_commit": "f" * 40}))
+        for response in (subprocess.CompletedProcess([], 128, "f" * 40 + "\trefs/tags/b99999\n"),
+                         subprocess.TimeoutExpired("git", 25), OSError("git unavailable")):
+            with self.subTest(response=response), \
+                 mock.patch.object(backend, "engine_info", return_value={"state": "not_installed"}), \
+                 mock.patch.object(backend, "newest_halo_tag", self.real_lookup), \
+                 mock.patch("subprocess.run") as remote, \
+                 mock.patch("subprocess.Popen") as spawn:
+                if isinstance(response, Exception):
+                    remote.side_effect = response
+                else:
+                    remote.return_value = response
+                self.assertFalse(backend.start_engine_install()["success"])
+                spawn.assert_not_called()
+
+    def test_latest_annotated_tag_uses_peeled_commit_not_tag_object(self):
+        output = ("a" * 40 + "\trefs/tags/b99\n" + "b" * 40 + "\trefs/tags/b100\n"
+                  + "c" * 40 + "\trefs/tags/b100^{}\n")
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, output)):
+            self.assertEqual(self.real_lookup(), (100, "b100", "c" * 40))
 
     def test_unsupported_host_can_launch_install_but_cannot_start(self):
         with mock.patch.object(backend, "gpu_devices", return_value=[]), \
@@ -119,6 +176,50 @@ class EngineContractTests(IsolatedBackend):
                     self.assertFalse(info["updating"])
             path.unlink()
 
+    def test_worker_keeps_selected_build_tag_and_commit_after_completion(self):
+        state = Path(backend.engine_paths()["update"])
+        state.parent.mkdir(parents=True)
+        selection = {"build": 12345, "tag": "b12345", "commit": "a" * 40}
+        state.write_text(json.dumps(selection))
+        with mock.patch.object(backend, "systemctl", return_value=(3, "inactive")), \
+             mock.patch("subprocess.call", return_value=0):
+            self.assertEqual(backend.engine_update_run(selection["commit"], first_install=True), 0)
+        saved = json.loads(state.read_text())
+        for key, value in selection.items():
+            self.assertEqual(saved[key], value)
+
+    def test_worker_rejects_missing_floating_or_extra_commit_arguments(self):
+        for verb in ("engine-install-run", "engine-update-run"):
+            for args in ([], [""], ["main"], ["b12345"], ["A" * 40], ["a" * 39],
+                         ["a" * 40, "extra"]):
+                with self.subTest(verb=verb, args=args), \
+                     mock.patch("sys.argv", ["omastrix", verb, *args]), \
+                     mock.patch.object(backend, "systemctl") as service, \
+                     mock.patch("subprocess.call") as installer, self.quiet(), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(backend.main(), 2)
+                    service.assert_not_called()
+                    installer.assert_not_called()
+
+    def test_existing_engine_files_block_first_install_in_launcher_and_worker(self):
+        for key in ("record", "bin"):
+            path = Path(backend.engine_paths()[key])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("newer existing engine")
+            try:
+                with mock.patch.object(backend, "engine_info", return_value={"state": "not_installed"}), \
+                     mock.patch.object(backend, "newest_halo_tag") as lookup, \
+                     mock.patch("subprocess.Popen") as spawn, \
+                     mock.patch("subprocess.call") as installer:
+                    self.assertFalse(backend.start_engine_install()["success"])
+                    self.assertEqual(backend.engine_update_run("a" * 40, first_install=True), 1)
+                    lookup.assert_not_called()
+                    spawn.assert_not_called()
+                    installer.assert_not_called()
+                self.assertEqual(path.read_text(), "newer existing engine")
+            finally:
+                path.unlink()
+
     def test_first_install_accepts_an_explicitly_missing_unit(self):
         def service(*args):
             if args[0] == "is-active":
@@ -132,7 +233,7 @@ class EngineContractTests(IsolatedBackend):
             self.assertEqual(backend.engine_update_run("a" * 40, first_install=True), 0)
         installer.assert_called_once()
         self.assertFalse("OMASTRIX_TEST_SECRET" in installer.call_args.kwargs["env"])
-        self.assertEqual(installer.call_args.args, ([backend.engine_paths()["installer"]],))
+        self.assertEqual(installer.call_args.args, ([backend.engine_paths()["installer"], "--first-install", "a" * 40],))
         lock_fd, = installer.call_args.kwargs["pass_fds"]
         self.assertEqual(installer.call_args.kwargs["env"]["OMASTRIX_ENGINE_LOCK_FD"], str(lock_fd))
 

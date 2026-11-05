@@ -1,6 +1,17 @@
 #!/bin/sh
-# Build the pinned Halo fork into the user profile. Does not start the server.
+# Build an immutable Halo commit locally. Does not start the server.
+# No arguments: reproducible pinned first install. Normal OmaStrix Install
+# resolves the newest published build and uses --first-install <commit>.
 set -eu
+FIRST_INSTALL=0
+case $# in
+  0) FIRST_INSTALL=1; REQUESTED_COMMIT= ;;
+  1) REQUESTED_COMMIT=$1
+     [ -n "$REQUESTED_COMMIT" ] || { echo "Commit must not be empty." >&2; exit 2; } ;;
+  2) [ "$1" = --first-install ] && [ -n "$2" ] || { echo "Usage: omastrix-engine-install [--first-install <40-character commit> | <40-character update commit>]" >&2; exit 2; }
+     FIRST_INSTALL=1; REQUESTED_COMMIT=$2 ;;
+  *) echo "Usage: omastrix-engine-install [--first-install <40-character commit> | <40-character update commit>]" >&2; exit 2 ;;
+esac
 PIN_FILE="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)/engine-pin.json"
 ROOT="${HOME}/.local/share/omastrix"
 BIN="${ROOT}/bin"
@@ -64,13 +75,12 @@ else
 fi
 exec 9>"$ROOT/.engine-install.lock"
 flock -n 9 || { echo "Engine install/update already in progress." >&2; exit 1; }
-if [ $# -eq 0 ] && { [ -e "${HOME}/.config/omastrix/engine.json" ] || [ -L "${HOME}/.config/omastrix/engine.json" ] || [ -e "$BIN/llama-server" ] || [ -L "$BIN/llama-server" ]; }; then
+if [ "$FIRST_INSTALL" -eq 1 ] && { [ -e "${HOME}/.config/omastrix/engine.json" ] || [ -L "${HOME}/.config/omastrix/engine.json" ] || [ -e "$BIN/llama-server" ] || [ -L "$BIN/llama-server" ]; }; then
   echo "Engine already installed. Use the explicit update action; first install will not downgrade it." >&2
   exit 1
 fi
-[ $# -le 1 ] && { [ $# -eq 0 ] || [ -n "$1" ]; } || { echo "Usage: omastrix-engine-install [40-character update commit]" >&2; exit 2; }
 # The manifest is data, not a git transport selector. Validate both entry paths.
-COMMIT=$(python3 - "$PIN_FILE" "${1-}" << 'PY'
+COMMIT=$(python3 - "$PIN_FILE" "$REQUESTED_COMMIT" << 'PY'
 import json, re, sys
 try:
     pin = json.load(open(sys.argv[1]))

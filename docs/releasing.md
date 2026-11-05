@@ -63,9 +63,10 @@ The requirements below distinguish scoped development-host verification from
 still-open release gates; a checked item is not blanket fresh-install acceptance:
 
 - [ ] Full offline tests/syntax/static review pass with recorded output and an
-  unchanged approved first-install engine pin.
+  unchanged reproducible engine baseline.
 - [ ] Clean Omarchy/Strix Halo install, including dependency discovery, engine
-  build at the pin, useful failure feedback/retry, and RADV device/heap validation.
+  newest-build discovery and exact-commit build, useful failure feedback/retry,
+  and RADV device/heap validation.
 - [ ] Safe host detection and smaller-memory behavior; unsupported hosts retain
   installation/WebUI/download features while engine startup, model loading and
   GTT changes fail closed. GTT choices cannot overcommit the host.

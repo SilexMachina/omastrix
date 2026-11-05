@@ -494,17 +494,17 @@ class EngineInstallTests(IsolatedBackend):
                      mock.patch("subprocess.Popen", return_value=mock.Mock(pid=12345)) as launch, \
                      mock.patch("subprocess.call", return_value=0) as install:
                     self.assertFalse(backend.start_engine_install()["success"])
-                    self.assertEqual(backend.engine_action("engine-install-run", ""), 1)
+                    self.assertEqual(backend.engine_action("engine-install-run", "a" * 40), 1)
                     launch.assert_not_called()
                     install.assert_not_called()
                 artifact.unlink()
 
-    def test_fresh_worker_uses_installer_default_pin_and_no_update_override(self):
+    def test_fresh_worker_uses_selected_commit_and_first_install_guard(self):
         with mock.patch.object(backend, "systemctl", return_value=(3, "inactive")), \
              mock.patch("subprocess.call", return_value=0) as install:
-            self.assertEqual(backend.engine_action("engine-install-run", ""), 0)
+            self.assertEqual(backend.engine_action("engine-install-run", "a" * 40), 0)
         self.assertEqual(install.call_count, 1)
-        self.assertEqual(install.call_args.args, ([backend.engine_paths()["installer"]],))
+        self.assertEqual(install.call_args.args, ([backend.engine_paths()["installer"], "--first-install", "a" * 40],))
         self.assertTrue(install.call_args.kwargs.get("pass_fds"))
 
     def test_concurrent_install_requests_launch_only_one_worker(self):
@@ -515,6 +515,7 @@ class EngineInstallTests(IsolatedBackend):
                 nested[0] = backend.start_engine_install()
             return mock.Mock(pid=12345)
         with mock.patch.object(backend, "engine_info", return_value={"installed": False}), \
+             mock.patch.object(backend, "newest_halo_tag", return_value=(200, "b200", "a" * 40)), \
              mock.patch.object(backend, "host_probe", return_value=("", {}, "", "", "", True)), \
              mock.patch("subprocess.Popen", side_effect=spawn) as launch:
             self.assertTrue(backend.start_engine_install()["success"])
@@ -533,11 +534,12 @@ class EngineInstallTests(IsolatedBackend):
     def test_engine_install_is_async_and_uses_shared_update_state(self):
         with mock.patch.object(sys, "argv", [str(BIN / "omastrix"), "engine-install"]), \
              mock.patch.object(backend, "engine_info", return_value={"installed": False, "state": "not_installed"}), \
+             mock.patch.object(backend, "newest_halo_tag", return_value=(200, "b200", "a" * 40)), \
              mock.patch.object(backend, "host_probe", return_value=("", {}, "", "", "", True)), \
              mock.patch("subprocess.Popen", return_value=mock.Mock(pid=12345)) as spawn, self.quiet():
             self.assertEqual(backend.main(), 0)
         spawn.assert_called_once()
-        self.assertEqual(spawn.call_args.args[0][1:], ["engine-install-run"])
+        self.assertEqual(spawn.call_args.args[0][1:], ["engine-install-run", "a" * 40])
         state = backend.read_json(backend.engine_paths()["update"])
         self.assertEqual(state["pid"], 12345)
         self.assertEqual(state["error"], "")

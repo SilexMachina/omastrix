@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "silexmachina.omastrix",
   "name": "OmaStrix",
-  "version": "0.5.0-preview.1",
+  "version": "0.5.0-preview.2",
   "author": "SilentD",
   "license": "MIT",
   "description": "Manage local AI on Strix Halo: models, GPU memory, strix-llama.cpp, and Open WebUI.",

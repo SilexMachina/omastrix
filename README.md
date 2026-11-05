@@ -8,7 +8,8 @@ and Open WebUI in one bar panel.
 
 ## Preview status
 
-**0.5.0-preview.1 is experimental software for public testing.** Fresh-machine,
+**Experimental preview software for public testing.** The current version is in
+[manifest.json](manifest.json), with changes in [CHANGELOG.md](CHANGELOG.md). Fresh-machine,
 reboot/recovery and full catalog acceptance are still in progress. Keep a
 recovery path before changing boot/GTT settings. See the
 [preview readiness report](docs/publication-audit.md) and
