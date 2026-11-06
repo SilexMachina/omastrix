@@ -1,4 +1,17 @@
 // Pure presentation rules, shared by QML and the Node test runner.
+function modelStatusResult(raw, exitCode, exitStatus) {
+  if (exitCode !== 0 || exitStatus !== 0) return "unknown";
+  try {
+    var info = JSON.parse(raw);
+    if (info && !Array.isArray(info) && ["empty", "ready", "active"].indexOf(info.state) >= 0) return info.state;
+  } catch (_) {}
+  return "unknown";
+}
+
+function modelStatusTooltip(state, unavailable) {
+  return "OmaStrix · " + (state === "unknown" ? (unavailable ? "Status unavailable" : "Checking status")
+    : state.charAt(0).toUpperCase() + state.slice(1));
+}
 function actionName(text, context) {
   return context ? text + " " + context : text;
 }

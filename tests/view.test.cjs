@@ -8,6 +8,28 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../View.js'), 'utf8'), con
 
 const panelSource = fs.readFileSync(path.join(__dirname, '../Panel.qml'), 'utf8');
 
+test('logo paths preserve the approved chip, S and four corner rays', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../ModelStatusIcon.qml'), 'utf8');
+  assert.match(source, /M7 5H17A2 2 0 0 1 19 7V17A2 2 0 0 1 17 19H7A2 2 0 0 1 5 17V7A2 2 0 0 1 7 5Z/);
+  assert.match(source, /M15 9H9v3h6v3H9/);
+  assert.match(source, /M2 2l1\.5 1\.5M20\.5 3\.5L22 2M2 22l1\.5-1\.5M20\.5 20\.5L22 22/);
+  assert.doesNotMatch(source, /opacity\s*:/);
+  assert.doesNotMatch(source, /urgent|Image\s*\{/);
+});
+
+test('model status uses only explicit lightweight observations', () => {
+  for (const state of ['empty', 'ready', 'active'])
+    assert.equal(context.modelStatusResult(JSON.stringify({state}), 0, 0), state);
+  for (const raw of ['', 'null', '[]', '{}', '{"state":"generating"}', '{"state":"unknown"}'])
+    assert.equal(context.modelStatusResult(raw, 0, 0), 'unknown');
+  assert.equal(context.modelStatusResult('{"state":"active"}', 1, 0), 'unknown');
+  assert.equal(context.modelStatusResult('{"state":"active"}', 0, 1), 'unknown');
+  for (const state of ['empty', 'ready', 'active'])
+    assert.equal(context.modelStatusTooltip(state, false), 'OmaStrix · ' + state[0].toUpperCase() + state.slice(1));
+  assert.equal(context.modelStatusTooltip('unknown', false), 'OmaStrix · Checking status');
+  assert.equal(context.modelStatusTooltip('unknown', true), 'OmaStrix · Status unavailable');
+});
+
 test('repeated action names identify their model or service without changing button text', () => {
   assert.equal(context.actionName('Load', 'Example model'), 'Load Example model');
   assert.equal(context.actionName('Open', 'Open WebUI'), 'Open Open WebUI');

@@ -25,10 +25,18 @@ the engine on another GPU does not establish inference support.
 On an up-to-date Omarchy installation with the plugin shell:
 
 ```sh
-omarchy plugin add https://github.com/SilexMachina/omastrix --enable
+omarchy plugin add https://github.com/SilexMachina/omastrix --enable --yes
 ```
 
-Choose a bar placement, then open OmaStrix. Installing the plugin does not
+This uses the recommended right-hand bar placement, keeping OmaStrix directly
+visible. Omit `--yes` to choose a section during installation. To move an
+existing installation into the right-hand section:
+
+```sh
+omarchy bar move silexmachina.omastrix --section right
+```
+
+Open the chip-shaped icon to use OmaStrix. Installing the plugin does not
 install the engine/WebUI, download weights, start a service, or change GTT.
 Those are explicit panel actions.
 

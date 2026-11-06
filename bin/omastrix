@@ -683,6 +683,9 @@ def emit_result(result):
 
 def main():
     verb = sys.argv[1] if len(sys.argv) > 1 else "snapshot"
+    if verb == "model-status":
+        print(json.dumps(library.model_status(), separators=(",", ":")))
+        return 0
     if verb in ("snapshot", "status"):
         print(json.dumps(snapshot(), separators=(",", ":")))
         return 0

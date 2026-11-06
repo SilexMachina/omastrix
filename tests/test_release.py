@@ -143,7 +143,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(manifest['kinds'], ['bar-widget'])
         self.assertEqual(manifest['entryPoints'], {'barWidget': 'Panel.qml'})
         self.assertIn(manifest['barWidget']['defaultSection'], ('left', 'center', 'right'))
-        payload = ('ActionButton.qml', 'View.js', 'bin/omastrix', 'bin/library.py',
+        payload = ('ActionButton.qml', 'ModelStatusIcon.qml', 'View.js', 'bin/omastrix', 'bin/library.py',
                    'bin/webui.py', 'bin/plugin_update.py', 'bin/dependencies.py', 'bin/omastrix-engine-install', 'catalog.json',
                    'engine-pin.json', 'LICENSE', *manifest['entryPoints'].values())
         for relative in payload:

@@ -49,7 +49,8 @@ ShellRoot {
       property var activePopout: null
       function requestPopout(owner) { activePopout = owner }
       function releasePopout(owner) { if (activePopout === owner) activePopout = null }
-      function showTooltip() {}
+      property string lastTooltip: ""
+      function showTooltip(owner, text) { lastTooltip = text }
       function hideTooltip() {}
       function run(command) { throw new Error("External action forbidden: " + command) }
     }
@@ -110,6 +111,94 @@ ShellRoot {
         plugin.smokeScroll.contentY = Math.max(0, Math.min(plugin.smokeScroll.contentHeight - plugin.smokeScroll.height,
           plugin.smokeScroll.contentY + p.y - 20))
         wait(30)
+      }
+      function test_00_logo_states() {
+        var icon = findChild(plugin, "modelStatusIcon")
+        verify(!!icon, "Single model status logo exists")
+        var button = icon.parent
+        verify(button.hasVisualContent && !button.labelVisible && !button.active)
+        compare(button.text, "")
+        var width = button.implicitWidth, height = button.implicitHeight
+        for (var state of ["empty", "ready", "active", "unknown"]) {
+          plugin.modelStatus = state
+          plugin.modelStatusUnavailable = false
+          wait(25)
+          compare(icon.state, state)
+          compare(icon.corners, state === "active")
+          compare(findChild(icon, "activeCorners").visible, state === "active")
+          verify(Qt.colorEqual(icon.inkColor, state === "active" ? Color.accent : state === "ready" ? "#249666" : Color.muted))
+          compare(button.implicitWidth, width)
+          compare(button.implicitHeight, height)
+          compare(button.tooltipText, "OmaStrix · " + (state === "unknown" ? "Checking status" : state.charAt(0).toUpperCase() + state.slice(1)))
+          var chip = findChild(icon, "chipStroke"), letter = findChild(icon, "letterStroke")
+          compare(chip.strokeColor, letter.strokeColor)
+          compare(icon.opacity, 1)
+          verify(icon.width >= 20 && icon.width <= 24)
+        }
+        plugin.modelStatusUnavailable = true
+        compare(button.tooltipText, "OmaStrix · Status unavailable")
+        fakeBar.vertical = true
+        compare(button.implicitWidth, fakeBar.barSize)
+        compare(button.implicitHeight, fakeBar.barSize)
+        fakeBar.vertical = false
+        mouseMove(button, -5, -5)
+        mouseMove(button, button.width / 2, button.height / 2)
+        compare(fakeBar.lastTooltip, button.tooltipText)
+        var opened = plugin.opened
+        mouseClick(button, button.width / 2, button.height / 2)
+        compare(plugin.opened, !opened)
+        mouseClick(button, button.width / 2, button.height / 2, Qt.MiddleButton)
+        compare(plugin.opened, !opened)
+        plugin.open()
+        plugin.refreshModelStatus()
+        wait(150) // Finish the middle-click snapshot before the lifecycle test.
+      }
+      function test_00b_status_poll_lifecycle() {
+        plugin.smokeSnapshotTimer.stop()
+        var original = plugin.payload
+        plugin.payload = Object.assign({}, original, {engine: {state: "stopped", installed: true}})
+        compare(plugin.modelStatus, "empty")
+        verify(!plugin.pollModelStatus)
+        wait(1100)
+        compare(plugin.modelStatus, "empty")
+        plugin.payload = Object.assign({}, original, {engine: {state: "not_installed", installed: false}})
+        compare(plugin.modelStatus, "empty")
+        plugin.payload = original
+        compare(plugin.modelStatus, "unknown", "Running awaits its first lightweight result")
+        tryVerify(function() { return plugin.modelStatus === "ready" }, 1000)
+        plugin.modelStatus = "active"
+        plugin.updateSnapshot(JSON.parse(JSON.stringify(original)))
+        compare(plugin.modelStatus, "active", "Full snapshots do not overwrite lightweight observations")
+        plugin.statusError = "TEST FIXTURE snapshot failure"
+        compare(plugin.modelStatus, "unknown")
+        verify(plugin.modelStatusUnavailable && !plugin.pollModelStatus)
+        plugin.statusError = ""
+        tryVerify(function() { return plugin.modelStatus === "ready" }, 1000)
+        plugin.payload = ({})
+        compare(plugin.modelStatus, "unknown")
+        verify(!plugin.modelStatusUnavailable)
+        plugin.payload = original
+        tryVerify(function() { return plugin.modelStatus === "ready" }, 1000)
+        plugin.smokeSnapshotTimer.start()
+      }
+      function test_00c_lightweight_results() {
+        for (var mode of ["empty", "active", "ready", "malformed", "failed", "unknown"]) {
+          plugin.runAction(["fixture-model-status", mode], "status-fixture")
+          tryVerify(function() { return !plugin.busy }, 1000)
+          wait(180) // Drain any worker started before changing the fixture.
+          plugin.refreshModelStatus()
+          for (var i = 0; i < 8; ++i) plugin.refreshModelStatus()
+          var expected = ["empty", "active", "ready"].indexOf(mode) >= 0 ? mode : "unknown"
+          tryVerify(function() { return plugin.modelStatus === expected }, 1500)
+          if (expected === "unknown") {
+            verify(plugin.modelStatusUnavailable)
+            compare(findChild(plugin, "modelStatusIcon").parent.tooltipText, "OmaStrix · Status unavailable")
+          }
+        }
+        plugin.runAction(["fixture-model-status", "ready"], "status-fixture")
+        tryVerify(function() { return !plugin.busy }, 1000)
+        wait(200)
+        plugin.actionArgs = []
       }
       function test_01b_model_layout() {
         for (var i = 0; i < plugin.models.length; ++i) {
@@ -184,9 +273,9 @@ ShellRoot {
         console.log("SMOKE screenshot SCREENSHOT")
         plugin.runAction(["fixture-wait"], "engine")
         wait(60)
-        verify(plugin.busy)
+        verify(plugin.busy, "Fixture wait action is pending")
         var working = visibleControl("Working…")
-        verify(!working.enabled)
+        verify(!working.enabled, "Pending service action is disabled")
         var point = working.mapToItem(plugin.smokeKeys, 0, 0)
         verify(point.x + working.width <= plugin.smokeKeys.width + 1, "Working text exceeds viewport")
         grabImage(plugin.smokeKeys).save("SCREENSHOT.working.png")
@@ -246,8 +335,8 @@ ShellRoot {
       function test_02d_network_access_controls() {
         var local = visibleControl("This device")
         var network = visibleControl("Local network")
-        verify(local.selected && !local.enabled)
-        verify(network.enabled)
+        verify(local.selected && !local.enabled, "Local access selected and disabled")
+        verify(network.enabled, "Network access available while stopped")
         contained(local)
         contained(network)
         mouseClick(network, network.width / 2, network.height / 2)
@@ -556,6 +645,23 @@ with (base / "backend-calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\\n")
 if args == ["snapshot"]:
     print((base / "snapshot.json").read_text())
+elif args == ["model-status"]:
+    import fcntl, time
+    with (base / "status-worker.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            (base / "overlapping-status-workers").touch()
+            sys.exit(96)
+        modefile = base / "model-status-mode"
+        mode = modefile.read_text() if modefile.exists() else "ready"
+        time.sleep(0.15)
+        if mode == "failed":
+            sys.exit(1)
+        print("not JSON" if mode == "malformed" else json.dumps(dict(state=mode)))
+elif len(args) == 2 and args[0] == "fixture-model-status" and args[1] in ("empty", "ready", "active", "unknown", "failed", "malformed"):
+    (base / "model-status-mode").write_text(args[1])
+    print(json.dumps(dict(success=True)))
 elif args == ["plugin-check"]:
     print(json.dumps(dict(success=True)))
 elif args == ["plugin-update"]:
@@ -605,10 +711,10 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
             (case / directory.name).symlink_to(directory, target_is_directory=True)
     plugin = case / "plugin"
     (plugin / "bin").mkdir(parents=True)
-    for filename in ("Panel.qml", "ActionButton.qml", "View.js"):
+    for filename in ("Panel.qml", "ActionButton.qml", "ModelStatusIcon.qml", "View.js"):
         shutil.copy2(REPO / filename, plugin / filename)
     panel = (plugin / "Panel.qml").read_text()
-    panel = panel.replace('  id: root\n', '  id: root\n  property alias smokePanel: panel\n  property alias smokeKeys: keyCatcher\n  property alias smokeScroll: scroll\n  property alias smokeLink: linkField\n', 1)
+    panel = panel.replace('  id: root\n', '  id: root\n  property alias smokeSnapshotTimer: snapshotTimer\n  property alias smokePanel: panel\n  property alias smokeKeys: keyCatcher\n  property alias smokeScroll: scroll\n  property alias smokeLink: linkField\n', 1)
     panel = panel.replace('  KeyboardPanel {', '  SmokeKeyboardPanel {', 1)
     (plugin / "Panel.qml").write_text(panel)
     (plugin / "SmokeKeyboardPanel.qml").write_text(WINDOW_ADAPTER)
@@ -629,6 +735,12 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
         qml = re.sub(r"function (test_\w+)\(", r"function helper_\1(", qml)
         qml = qml.replace('      function cleanupTestCase()', r'''      function test_unsupported_hardware_policy() {
         verify(!plugin.halo, "unsupported fixture")
+        var icon = findChild(plugin, "modelStatusIcon")
+        compare(icon.state, "empty")
+        verify(Qt.colorEqual(icon.inkColor, Color.muted))
+        verify(!icon.parent.active && !icon.parent.labelVisible && icon.parent.hasVisualContent)
+        compare(icon.parent.text, "")
+        compare(icon.parent.tooltipText, "OmaStrix · Empty")
         var warning = labels("Hardware Unsupported - strix-llama.cpp will not function")[0]
         verify(!!warning, "header warning visible")
         compare(warning.color, plugin.urgent)
@@ -700,14 +812,17 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
     print(f"=== {name} exit={code} ===\n{output}")
     callfile = plugin / "backend-calls.jsonl"
     calls = [json.loads(line) for line in callfile.read_text().splitlines()] if callfile.exists() else []
-    allowed = [["engine-install"], ["engine-install", "--confirm"], ["webui-install", "--confirm"], ["plugin-check"], ["plugin-update"], ["fixture-plugin-updated"], ["webui-install"], ["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
+    allowed = [["model-status"], ["engine-install"], ["engine-install", "--confirm"], ["webui-install", "--confirm"], ["plugin-check"], ["plugin-update"], ["fixture-plugin-updated"], ["webui-install"], ["library-download", "fixture-remote"], ["webui-access", "network"], ["snapshot"], ["fixture-wait"], ["library-add", "https://fixture.invalid/model.gguf"], ["library-delete", "fixture-ready"], ["library-delete", "fixture-ready", "--confirm"]]
+    allowed += [["fixture-model-status", mode] for mode in ("empty", "ready", "active", "unknown", "failed", "malformed")]
     unexpected = [call for call in calls if call not in allowed]
     platform_warnings = [line for line in output.splitlines() if line.strip() == "WARN: This plugin does not support setting window masks"]
     bad_log = [line for line in output.splitlines() if re.search(r"\b(?:WARN|ERROR|FAIL!)\b", line) and line not in platform_warnings]
     outcomes = re.findall(r"SMOKE_END (test_\w+) failed=(true|false)", output)
-    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 18)
+    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 21)
           and all(failed == "false" for _, failed in outcomes)
-          and not unexpected and not bad_log and screenshot.exists())
+          and not unexpected and not bad_log and screenshot.exists()
+          and not (plugin / "overlapping-status-workers").exists()
+          and ((["model-status"] not in calls) if unsupported else (["model-status"] in calls)))
     return dict(name=name, passed=ok, exit_code=code, warnings_errors=sorted(set(bad_log)),
                 platform_warnings=sorted(set(platform_warnings)), tests=dict(outcomes), backend_calls=calls,
                 screenshot=str(screenshot) if screenshot.exists() else None, log=str(case / "quickshell.log"))

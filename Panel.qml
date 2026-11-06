@@ -22,6 +22,33 @@ Panel {
   property var actionArgs: []
   property string addLink: ""
   property string statusError: ""
+  property string modelStatus: "unknown"
+  property bool modelStatusUnavailable: false
+  property int modelStatusEpoch: 0
+  property int modelStatusRequestEpoch: -1
+  readonly property bool pollModelStatus: hasSnapshot && statusError === "" && engine.state === "running"
+
+  function resetModelStatus() {
+    modelStatusEpoch++
+    // Read the new payload directly: derived bindings can still be pending
+    // while onPayloadChanged runs (especially initial stopped snapshots).
+    var observed = (payload.engine || {}).state
+    var present = typeof payload.strix_halo === "boolean"
+    modelStatus = present && statusError === "" && ["stopped", "not_installed"].indexOf(observed) >= 0 ? "empty" : "unknown"
+    modelStatusUnavailable = statusError !== "" || (present && modelStatus === "unknown" && observed !== "running")
+  }
+
+  function refreshModelStatus() {
+    if (!pollModelStatus || modelStatusProc.running) return
+    modelStatusRequestEpoch = modelStatusEpoch
+    modelStatusProc.command = [scriptPath(), "model-status"]
+    modelStatusProc.running = true
+  }
+
+  onPollModelStatusChanged: {
+    resetModelStatus()
+    if (pollModelStatus) refreshModelStatus()
+  }
   readonly property bool busy: actionProc.running || gttProc.running
   readonly property bool halo: payload.strix_halo === true
   readonly property bool hasSnapshot: payload.strix_halo !== undefined
@@ -183,6 +210,7 @@ Panel {
   }
 
   onPayloadChanged: {
+    if (!payload.engine || payload.engine.state !== "running" || statusError !== "") resetModelStatus()
     // A dismissal belongs only to the current uninterrupted error occurrence.
     var next = Object.assign({}, dismissed)
     Object.keys(next).forEach(function(scope) {
@@ -193,11 +221,33 @@ Panel {
   onOpenedChanged: if (!opened) confirmation = ({})
 
   Timer {
+    id: snapshotTimer
     interval: root.opened || (root.payload.library && root.payload.library.generating) ? 2000
       : Math.max(2, Number(root.setting("refreshIntervalSec", 5))) * 1000
     running: true
     repeat: true
     onTriggered: root.refresh()
+  }
+
+  Timer {
+    interval: 1000
+    running: root.pollModelStatus
+    repeat: true
+    onTriggered: root.refreshModelStatus()
+  }
+
+  Process {
+    id: modelStatusProc
+    stdout: StdioCollector { id: modelStatusOut; waitForEnd: true }
+    onExited: function(code, exitStatus) {
+      if (!root.pollModelStatus) return
+      if (root.modelStatusRequestEpoch !== root.modelStatusEpoch) {
+        Qt.callLater(root.refreshModelStatus)
+        return
+      }
+      root.modelStatus = View.modelStatusResult(modelStatusOut.text, code, exitStatus)
+      root.modelStatusUnavailable = root.modelStatus === "unknown"
+    }
   }
 
   Process {
@@ -239,12 +289,21 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.payload.pill || "GTT ?"
-    active: (root.hasSnapshot && (!root.halo || root.payload.gtt_default))
-      || root.engine.state === "failed" || (root.halo && root.engine.state !== "running") || root.statusError !== ""
+    text: ""
+    hasVisualContent: true
+    labelVisible: false
+    active: false
+    fixedWidth: vertical ? barSize : 40
+    fixedHeight: barSize
+    ModelStatusIcon {
+      anchors.centerIn: parent
+      width: 22
+      height: 22
+      state: root.modelStatus
+    }
     fontSize: Style.font.title
     horizontalMargin: 8.75
-    tooltipText: "OmaStrix" + (root.payload.gtt_pending ? " · Reboot to apply GTT change" : "")
+    tooltipText: View.modelStatusTooltip(root.modelStatus, root.modelStatusUnavailable)
     onPressed: function(code) {
       if (code === Qt.MiddleButton) root.refresh()
       else root.toggle()

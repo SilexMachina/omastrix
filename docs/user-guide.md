@@ -32,6 +32,28 @@ Existing installations are preserved until Update is explicitly selected.
 `open-webui==0.13.0` on Python 3.11; Check/Update is explicit and independent of
 the plugin version.
 
+## Bar icon
+
+The chip-and-S logo shows model activity:
+
+- **Empty:** gray, with the chip and S at equal brightness; no model is loaded.
+- **Ready:** green; a model is loaded and idle.
+- **Active:** the theme accent with four small corner marks; the engine is
+  processing an inference request.
+
+The icon keeps a fixed size and does not blink. Hover for the status in words;
+click to open the panel for memory readings and controls. Initial or unavailable
+readings use the neutral gray icon with a checking/unavailable tooltip, without
+claiming a model is idle. Stopped or uninstalled engines show Empty. Unsupported
+hardware details remain inside the panel.
+
+The recommended installation places the icon directly in the bar's right-hand
+section. To move an existing icon there:
+
+```sh
+omarchy bar move silexmachina.omastrix --section right
+```
+
 ## System controls
 
 **Install** builds or installs the missing component. If prerequisites are
@@ -110,7 +132,7 @@ until dismissed or retried. Confirmations provide **Confirm** and **Cancel**.
 Tab/Shift+Tab and j/k move through controls; Enter/Space activate the focused
 button. The link editor accepts normal text. Escape leaves the editor, cancels
 a pending confirmation, or closes the panel. Scroll to reach lower rows.
-Middle-click the bar pill to refresh status.
+Middle-click the bar icon to refresh status.
 
 ## Storage
 

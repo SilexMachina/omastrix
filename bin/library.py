@@ -308,6 +308,29 @@ def server_list():
     return out
 
 
+def model_status():
+    """Read router activity without consulting or changing the local library."""
+    server = server_list()
+    if server is None:
+        return {"state": "unknown"}
+    loaded = [name for name, status in server.items() if status == "loaded"]
+    if not loaded:
+        return {"state": "empty"}
+    unknown = False
+    for name in loaded:
+        quoted = urllib.parse.quote(name, safe="")
+        slots = http_json("/slots?autoload=false&model=" + quoted, timeout=1)
+        if not isinstance(slots, list):
+            unknown = True
+            continue
+        for slot in slots:
+            if not isinstance(slot, dict) or type(slot.get("is_processing")) is not bool:
+                unknown = True
+            elif slot["is_processing"]:
+                return {"state": "active"}
+    return {"state": "unknown" if unknown else "ready"}
+
+
 def legacy_bindings(rows):
     """Resolve old display-name routes without assigning one name to two files.
 

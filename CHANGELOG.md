@@ -3,6 +3,10 @@
 Versions marked Unreleased are available from the default branch and have not
 been published as separate GitHub releases.
 
+## [0.5.0-preview.5] - Unreleased
+
+- Show a fixed-size stateful logo for Empty, Ready and Active model states, with detailed readings inside the panel.
+
 ## [0.5.0-preview.4] - Unreleased
 
 - Install missing dependencies after confirmation and continue component setup automatically.
