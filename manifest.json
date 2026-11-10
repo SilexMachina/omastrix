@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "silexmachina.omastrix",
+  "name": "OmaStrix",
+  "version": "0.5.0-preview.5",
+  "author": "OmaStrix contributors",
+  "license": "MIT",
+  "description": "Manage local AI on Strix Halo: models, GPU memory, strix-llama.cpp, and Open WebUI.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaStrix",
+    "description": "Local AI for Strix Halo",
+    "category": "AI",
+    "aliases": [
+      "omastrix",
+      "gtt",
+      "strix"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 5
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}

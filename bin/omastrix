@@ -1,0 +1,761 @@
+#!/usr/bin/env python3
+"""OmaStrix host snapshot. Local sysfs only. Prints one JSON object."""
+
+import fcntl
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import library
+import dependencies
+import webui
+
+# Stock TTM pages_limit is about 16.3M pages (~62 GiB). A ceiling at or under
+# this is the kernel default, not a Strix Halo raise.
+STOCK_PAGES_LIMIT = 17_000_000
+LIMINE_CONF = "/etc/limine-entry-tool.d/amd-gtt.conf"
+MODPROBE_CONF = "/etc/modprobe.d/amd-gtt.conf"
+# GiB label -> 4 KiB page count, and amdgpu.gttsize in MiB.
+GTT_CHOICES = {
+    "64": {"pages": 16_777_216, "gttsize": 65_536},
+    "96": {"pages": 25_165_824, "gttsize": 98_304},
+    "110": {"pages": 28_835_840, "gttsize": 112_640},
+}
+
+
+def read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def read_int(path):
+    text = read_text(path)
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def gib(n):
+    if n is None:
+        return None
+    return round(n / 1024**3, 2)
+
+
+def cmdline():
+    return read_text("/proc/cmdline").split()
+
+
+def pages_from_text(text):
+    for part in text.split():
+        if "ttm.pages_limit=" in part:
+            raw = part.split("ttm.pages_limit=", 1)[1]
+            raw = raw.split()[0].strip("\"'")
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+        if part.startswith("pages_limit="):
+            try:
+                return int(part.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def choice_for_pages(pages):
+    if pages is None:
+        return ""
+    for label, spec in GTT_CHOICES.items():
+        if spec["pages"] == pages:
+            return label
+    return ""
+
+
+def configured_pages():
+    # The boot files are the setting. Cmdline is what is live until reset.
+    for path in (LIMINE_CONF, MODPROBE_CONF):
+        pages = pages_from_text(read_text(path))
+        if pages:
+            return pages
+    return pages_limit()
+
+
+def file_bodies(label):
+    spec = GTT_CHOICES[label]
+    pages = spec["pages"]
+    gttsize = spec["gttsize"]
+    limine = (
+        "# OmaStrix GTT ceiling: %s GiB.\n"
+        "# pages_limit is 4 KiB pages.\n"
+        "KERNEL_CMDLINE[default]+=\" ttm.pages_limit=%d ttm.page_pool_size=%d "
+        "amdgpu.gttsize=%d amdgpu.vm_size=256\"\n"
+    ) % (label, pages, pages, gttsize)
+    modprobe = (
+        "# OmaStrix GTT ceiling: %s GiB. vm_size is GPU VA space in GB, not a RAM steal.\n"
+        "options ttm pages_limit=%d page_pool_size=%d\n"
+        "options amdgpu gttsize=%d vm_size=256\n"
+    ) % (label, pages, pages, gttsize)
+    return limine, modprobe
+
+
+def replace_file(path, body, mode):
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as fh:
+            tmp = fh.name
+            fh.write(body)
+            os.fchmod(fh.fileno(), mode)
+        os.replace(tmp, path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def write_gtt(label):
+    limine, modprobe = file_bodies(label)
+    original = {}
+    changed = []
+    try:
+        for path in (LIMINE_CONF, MODPROBE_CONF):
+            if os.path.islink(path):
+                raise ValueError("GTT configuration must not be a symlink")
+            try:
+                with open(path, "rb") as fh:
+                    original[path] = (fh.read(), os.fstat(fh.fileno()).st_mode & 0o777)
+            except FileNotFoundError:
+                original[path] = None
+        for path, body in ((LIMINE_CONF, limine), (MODPROBE_CONF, modprobe)):
+            replace_file(path, body.encode(), 0o644)
+            changed.append(path)
+        built = subprocess.run(["limine-mkinitcpio"], capture_output=True, text=True)
+        if built.returncode != 0:
+            raise OSError((built.stderr or built.stdout or "limine-mkinitcpio failed").strip())
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        failures = []
+        for path in reversed(changed):
+            try:
+                previous = original[path]
+                if previous is None:
+                    os.unlink(path)
+                else:
+                    replace_file(path, *previous)
+            except OSError as restore_error:
+                failures.append("%s: %s" % (path, restore_error))
+        error = "GTT change failed: %s" % exc
+        if failures:
+            error += ". Restore failed: " + "; ".join(failures)
+        elif changed:
+            error += ". Previous configuration restored; rebuild boot images before rebooting."
+        print(json.dumps({"success": False, "error": error}))
+        return 1
+    print(json.dumps({"success": True, "gtt_set": label, "pending": True}))
+    return 0
+
+
+def pages_limit():
+    for token in cmdline():
+        if token.startswith("ttm.pages_limit="):
+            try:
+                return int(token.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def mem_total_bytes():
+    for line in read_text("/proc/meminfo").splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+def gpu_devices():
+    found = []
+    for path in sorted(glob.glob("/sys/class/drm/card*/device")):
+        card = path.split("/sys/class/drm/")[1].split("/")[0]
+        if "-" in card:
+            continue
+        if not os.path.exists(os.path.join(path, "mem_info_gtt_total")):
+            continue
+        found.append(path)
+    return found
+
+
+def lspci_name(slot):
+    if not slot:
+        return ""
+    try:
+        out = subprocess.run(
+            ["lspci", "-nn", "-s", slot],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    line = (out.stdout or "").strip().splitlines()
+    return line[0] if line else ""
+
+
+def is_strix_halo(pci, name):
+    blob = (pci + " " + name).lower()
+    if "strix halo" in blob or "strix_halo" in blob or "gfx1151" in blob:
+        return True
+    if any(token in blob for token in ("8060s", "8050s", "8040s")):
+        return True
+    # pci.ids names 1002:1586 as the Strix Halo display controller family.
+    return "1002:1586" in blob.replace("0x", "")
+
+
+def supported_gtt_choices(strix_halo, mem_bytes):
+    if not strix_halo or not mem_bytes:
+        return []
+    return [label for label in GTT_CHOICES
+            if (int(label) + library.RESERVE_GIB) * 1024**3 <= mem_bytes]
+
+
+def pill(used, total, default):
+    if used is None or total is None:
+        return "GTT ?"
+    mark = "!" if default else ""
+    return "%d/%dG%s" % (round(used), round(total), mark)
+
+
+def host_probe():
+    devices = gpu_devices()
+    device = devices[0] if devices else ""
+    uevent = {}
+    if device:
+        for line in read_text(os.path.join(device, "uevent")).splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                uevent[key] = value
+    pci = (uevent.get("PCI_ID") or "").lower()
+    slot = uevent.get("PCI_SLOT_NAME") or ""
+    name = lspci_name(slot)
+    halo = bool(device) and uevent.get("DRIVER") == "amdgpu" and is_strix_halo(pci, name)
+    return device, uevent, pci, slot, name, halo
+
+
+def snapshot():
+    import plugin_update
+
+    device, uevent, pci, slot, name, halo = host_probe()
+    mem_bytes = mem_total_bytes()
+    gtt_total = read_int(os.path.join(device, "mem_info_gtt_total")) if device else None
+    gtt_used = read_int(os.path.join(device, "mem_info_gtt_used")) if device else None
+    limit = pages_limit()
+    configured = configured_pages()
+    choice = choice_for_pages(configured) or choice_for_pages(limit)
+    live_choice = choice_for_pages(None)
+    # Live ceiling matches a box when it is within half a GiB of that size.
+    if gtt_total:
+        for label in ("64", "96", "110"):
+            if abs(gtt_total - int(label) * 1024**3) < 512 * 1024**2:
+                live_choice = label
+                break
+    default = limit is None or limit <= STOCK_PAGES_LIMIT
+    used_g = gib(gtt_used)
+    total_g = gib(gtt_total)
+
+    pending = bool(choice) and choice != live_choice
+    lib = library.library_view(total_g)
+    library.write_preset(total_g)
+    pill_text = pill(used_g, total_g, default)
+    if lib.get("loaded_short"):
+        mark = "*" if lib.get("generating") else ""
+        pill_text = "%s%s %s" % (lib["loaded_short"], mark, pill_text)
+    return {
+        "strix_halo": halo,
+        "gpu_name": name,
+        "pci": pci,
+        "slot": slot,
+        "driver": uevent.get("DRIVER") or "",
+        "gtt_used_gib": used_g,
+        "gtt_total_gib": total_g,
+        "gtt_default": default,
+        "gtt_set": choice,
+        "gtt_live": live_choice,
+        "gtt_pending": pending,
+        "supported_gtt": supported_gtt_choices(halo, mem_bytes),
+        "gtt_choices": supported_gtt_choices(halo, mem_bytes),
+        "app_version": read_json(os.path.join(library.root_dir(), "manifest.json")).get("version") or "",
+        "pages_limit": limit,
+        "mem_total_gib": gib(mem_bytes),
+        "pill": pill_text,
+        "vertical": "GTT" if halo else "?",
+        "plugin": plugin_update.status(),
+        "engine": engine_info(),
+        "webui": webui_info(),
+        "library": lib,
+    }
+
+
+def webui_info():
+    return webui.status()
+
+
+def engine_paths():
+    home = os.path.expanduser("~")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return {
+        "bin": os.path.join(home, ".local/share/omastrix/bin/llama-server"),
+        "record": os.path.join(home, ".config/omastrix/engine.json"),
+        "pin": os.path.join(root, "engine-pin.json"),
+        "unit": "omastrix-llama.service",
+        "ui": "http://127.0.0.1:8080",
+        "installer": os.path.join(root, "bin/omastrix-engine-install"),
+        "check": os.path.join(home, ".local/state/omastrix/engine-check.json"),
+        "update": os.path.join(home, ".local/state/omastrix/engine-update.json"),
+        "update_log": os.path.join(home, ".local/state/omastrix/engine-update.log"),
+    }
+
+
+def read_json(path):
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def text_field(data, key):
+    value = data.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def build_number(version):
+    match = re.search(r"build (\d+)", version) if isinstance(version, str) else None
+    return int(match.group(1)) if match else 0
+
+
+def pid_alive(pid):
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
+def newest_halo_tag():
+    try:
+        remote = subprocess.run(
+            ["git", "ls-remote", "--tags", "https://github.com/halo-box/strix-llama.cpp.git"],
+            capture_output=True, text=True, timeout=25, check=False,
+        )
+    except FileNotFoundError:
+        return newest_halo_tag_without_git()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if remote.returncode != 0:
+        return None
+    tags, peeled = {}, {}
+    for line in (remote.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        sha, ref = parts
+        match = re.fullmatch(r"refs/tags/(b[0-9]+)(\^\{\})?", ref)
+        if match and re.fullmatch(r"[0-9a-f]{40}", sha):
+            (peeled if match[2] else tags)[match[1]] = sha
+    if not tags:
+        return None
+    name = max(tags, key=lambda name: int(name[1:]))
+    # Annotated tag object IDs are not commits: use their peeled target.
+    return int(name[1:]), name, peeled.get(name, tags[name])
+
+
+def newest_halo_tag_without_git():
+    """Resolve the same immutable selection when git is itself a prerequisite."""
+    import urllib.request
+    base = "https://api.github.com/repos/halo-box/strix-llama.cpp/git/"
+    def fetch(endpoint):
+        with urllib.request.urlopen(base + endpoint, timeout=25) as response:
+            return json.load(response)
+    try:
+        refs = fetch("matching-refs/tags/b")
+        if not isinstance(refs, list):
+            return None
+        tags = {}
+        for row in refs:
+            if not isinstance(row, dict):
+                continue
+            match = re.fullmatch(r"refs/tags/(b[0-9]+)", row.get("ref", ""))
+            obj = row.get("object")
+            if match and isinstance(obj, dict):
+                tags[match[1]] = obj
+        if not tags:
+            return None
+        name = max(tags, key=lambda tag: int(tag[1:]))
+        obj = tags[name]
+        # Peel annotated tags without ever accepting an API-provided URL.
+        for _ in range(5):
+            sha = obj.get("sha")
+            if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                return None
+            if obj.get("type") == "commit":
+                return int(name[1:]), name, sha
+            if obj.get("type") != "tag":
+                return None
+            obj = fetch("tags/" + sha).get("object", {})
+        return None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def systemctl(*args):
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", *args],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+    text = (out.stdout or out.stderr or "").strip()
+    return out.returncode, text
+
+
+def port_open():
+    try:
+        out = subprocess.run(["ss", "-ltn"], capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return any(line.split()[3].endswith(":8080") for line in (out.stdout or "").splitlines() if line.split())
+
+
+def engine_info():
+    paths = engine_paths()
+    record = read_json(paths["record"])
+    pin = read_json(paths["pin"])
+    installed = os.path.isfile(paths["bin"]) and os.access(paths["bin"], os.X_OK)
+    active, active_text = systemctl("is-active", paths["unit"])
+    enabled, enabled_text = systemctl("is-enabled", paths["unit"])
+    state = library.service_state(active, active_text)
+    listening = port_open()
+    check = read_json(paths["check"])
+    updating = read_json(paths["update"])
+    build = build_number(record.get("version") or "")
+    latest_build = check.get("latest_build")
+    if type(latest_build) is not int or latest_build < 0:
+        latest_build = 0
+    is_updating = pid_alive(updating.get("pid"))
+    return {
+        "installed": installed,
+        "hardware_supported": host_probe()[-1],
+        "version": text_field(record, "version"),
+        "build": build,
+        "commit": text_field(record, "commit"),
+        "pin": text_field(pin, "commit"),
+        "state": "installing" if is_updating and not installed else (state if installed else "not_installed"),
+        "install_phase": text_field(updating, "phase") if is_updating else "",
+        "autostart": enabled_text == "enabled",
+        "listening": listening,
+        "ui": paths["ui"],
+        "latest_build": latest_build,
+        "latest_tag": text_field(check, "latest_tag"),
+        "update_available": bool(latest_build and build and latest_build > build and not is_updating),
+        "updating": is_updating,
+        "update_error": "" if is_updating else text_field(updating, "error"),
+    }
+
+
+@library.serialized("engine")
+def start_engine():
+    if not host_probe()[-1]:
+        return {"success": False, "error": "Engine start requires an amdgpu Strix Halo host; unsupported hardware is install-only preview."}
+    code, text = systemctl("start", engine_paths()["unit"])
+    return {"success": code == 0, "error": "" if code == 0 else text}
+
+
+def engine_action(verb, arg):
+    paths = engine_paths()
+    if verb == "engine-start":
+        return emit_result(start_engine())
+    if verb == "engine-stop":
+        code, text = systemctl("stop", paths["unit"])
+        print(json.dumps({"success": code == 0, "error": "" if code == 0 else text}))
+        return 0 if code == 0 else 1
+    if verb == "engine-autostart":
+        if arg not in ("on", "off"):
+            print("engine-autostart needs on or off", file=sys.stderr)
+            return 2
+        code, text = systemctl("enable" if arg == "on" else "disable", paths["unit"])
+        print(json.dumps({"success": code == 0, "autostart": arg == "on", "error": "" if code == 0 else text}))
+        return 0 if code == 0 else 1
+    if verb == "engine-check":
+        info = engine_info()
+        latest = newest_halo_tag()
+        installed = build_number(info.get("version") or "")
+        if latest is None:
+            info["success"] = False
+            info["error"] = "Could not check for a newer strix-llama.cpp build."
+            print(json.dumps(info))
+            return 1
+        number, name, commit = latest
+        os.makedirs(os.path.dirname(engine_paths()["check"]), exist_ok=True)
+        library.atomic_json(engine_paths()['check'], {'latest_tag': name, 'latest_build': number, 'latest_commit': commit})
+        info["latest_tag"] = name
+        info["latest_build"] = number
+        info["build"] = installed
+        info["update_available"] = bool(installed and number > installed)
+        info["success"] = True
+        if not installed:
+            info["message"] = "strix-llama.cpp is not installed. Newest published build is %s." % number
+        elif number > installed:
+            info["message"] = "A newer strix-llama.cpp is published: build %s. You have build %s." % (number, installed)
+        else:
+            info["message"] = "strix-llama.cpp is the newest published build, %s." % installed
+        print(json.dumps(info))
+        return 0
+    if verb == "engine-install":
+        result = start_engine_install(confirm=arg == "--confirm")
+        print(json.dumps(result))
+        return 0 if result.get("success") is True else 1
+    if verb == "engine-dependencies-run":
+        return engine_update_run(arg, first_install=True, install_dependencies=True)
+    if verb == "engine-install-run":
+        return engine_update_run(arg, first_install=True)
+    if verb == "engine-update":
+        return emit_result(start_engine_update())
+    if verb == "engine-update-run":
+        return engine_update_run(arg)
+    print("unknown verb: %s" % verb, file=sys.stderr)
+    return 2
+
+
+@library.serialized("engine", error_state=lambda: engine_paths()["update"])
+def start_engine_install(confirm=False):
+    info = engine_info()
+    if info.get("installed"):
+        return {"success": True, "message": "strix-llama.cpp is already installed."}
+    paths = engine_paths()
+    if any(os.path.lexists(paths[key]) for key in ("record", "bin")):
+        return {"success": False, "error": "Existing engine files found; first install cannot replace or repair them."}
+    if info.get("state") in ("running", "starting"):
+        return {"success": False, "error": "Stop strix-llama.cpp before installing."}
+    if pid_alive(read_json(paths["update"]).get("pid")):
+        return {"success": True, "message": "Engine installation is already running."}
+    packages = dependencies.missing("engine", strix=host_probe()[-1])
+    if packages and not confirm:
+        return dependencies.approval(packages)
+    latest = newest_halo_tag()
+    if latest is None:
+        return {"success": False, "error": "Could not resolve the newest published strix-llama.cpp build; installation was not started."}
+    number, name, commit = latest
+    if (type(number) is not int or number < 0 or name != "b%s" % number
+            or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+        return {"success": False, "error": "Invalid published engine selection; installation was not started."}
+    os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
+    selection = {'pid': 0, 'error': '', 'build': number, 'tag': name, 'commit': commit,
+                 'phase': 'dependencies' if packages else 'build'}
+    library.atomic_json(paths['update'], selection)
+    with open(paths["update_log"], "ab") as log:
+        proc = subprocess.Popen(
+            [os.path.abspath(__file__), "engine-dependencies-run" if packages else "engine-install-run", commit],
+            start_new_session=True, stdout=log, stderr=subprocess.STDOUT,
+        )
+    library.atomic_json(paths['update'], {**selection, 'pid': proc.pid})
+    return {"success": True, "message": "Installing strix-llama.cpp build %s." % number}
+
+
+@library.serialized("engine", error_state=lambda: engine_paths()["update"])
+def start_engine_update():
+    info = engine_info()
+    if info.get("state") not in ("stopped", "failed"):
+        return {
+            "success": False,
+            "error": "Stop strix-llama.cpp before updating.",
+        }
+    paths = engine_paths()
+    updating = read_json(paths["update"])
+    if pid_alive(updating.get("pid")):
+        return {"success": True, "message": "strix-llama.cpp is already updating."}
+    latest = newest_halo_tag()
+    if latest is None:
+        return {"success": False, "error": "Could not check for a newer strix-llama.cpp build."}
+    number, _name, commit = latest
+    installed = build_number(info.get("version") or "")
+    if installed and number <= installed:
+        return {"success": True, "message": "strix-llama.cpp is already the newest published build, %s." % installed}
+    os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
+    with open(paths["update_log"], "ab") as log:
+        proc = subprocess.Popen(
+            [os.path.abspath(__file__), "engine-update-run", commit],
+            start_new_session=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    library.atomic_json(paths['update'], {'pid': proc.pid, 'error': '', 'build': number, 'commit': commit})
+    return {
+        "success": True,
+        "message": "Updating strix-llama.cpp to build %s." % number,
+    }
+
+
+def engine_update_run(commit, first_install=False, install_dependencies=False):
+    # Own the descriptor so the installer can inherit the same flock instead of
+    # reopening (and contending with) its parent's engine lock.
+    paths = engine_paths()
+    try:
+        lock_path = os.path.join(os.path.dirname(paths["update"]), "engine.lock")
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return engine_update_locked(commit, first_install, lock.fileno(), install_dependencies)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        error = str(exc)
+        try:
+            library.atomic_json(paths["update"], {"pid": 0, "error": error})
+        except (OSError, ValueError) as state_error:
+            error += "; could not save failure state: " + str(state_error)
+        print(json.dumps({"success": False, "error": error}))
+        return 1
+
+
+def engine_update_locked(commit, first_install, lock_fd, install_dependencies=False):
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
+        print("engine update needs a commit", file=sys.stderr)
+        return 2
+    paths = engine_paths()
+    os.makedirs(os.path.dirname(paths["update"]), exist_ok=True)
+    if first_install and any(os.path.lexists(paths[key]) for key in ("record", "bin")):
+        library.atomic_json(paths["update"], {"pid": 0, "error": "Existing engine files found; first install cannot replace or repair them."})
+        return 1
+    code, state = systemctl("is-active", paths["unit"])
+    missing_unit = False
+    if first_install and code == 4 and state in ("inactive", "unknown"):
+        probe_code, properties = systemctl("show", paths["unit"], "--property=LoadState", "--property=ActiveState")
+        missing_unit = probe_code == 0 and sorted(properties.splitlines()) == [
+            "ActiveState=inactive", "LoadState=not-found"]
+    if library.service_state(code, state) not in ("stopped", "failed") and not missing_unit:
+        library.atomic_json(paths['update'], {'pid': 0, 'error': 'Stop strix-llama.cpp before installing or updating.'})
+        return 1
+    if first_install:
+        if install_dependencies:
+            selection = read_json(paths["update"])
+            library.atomic_json(paths["update"], {**selection, "pid": os.getpid(), "phase": "dependencies", "error": ""})
+            dependencies.install("engine", strix=host_probe()[-1])
+        elif dependencies.missing("engine", strix=host_probe()[-1]):
+            raise ValueError("Engine dependencies require approval; use engine-install --confirm.")
+        selection = read_json(paths["update"])
+        library.atomic_json(paths["update"], {**selection, "pid": os.getpid(), "phase": "build", "error": ""})
+    # Public-source builds need process/session paths, not application credentials
+    # or unrelated environment variables. Keep only the installer's supported inputs.
+    environment_keys = (
+        "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+        "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "OMASTRIX_RADV_ICD",
+        "CMAKE_BUILD_PARALLEL_LEVEL", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    )
+    environment = {key: os.environ[key] for key in environment_keys if key in os.environ}
+    environment["OMASTRIX_ENGINE_LOCK_FD"] = str(lock_fd)
+    code = subprocess.call(
+        [paths["installer"]] + (["--first-install", commit] if first_install else [commit]),
+        pass_fds=(lock_fd,), env=environment,
+    )
+    selection = read_json(paths["update"])
+    metadata = {key: selection[key] for key in ("build", "tag") if key in selection} if selection.get("commit") == commit else {}
+    library.atomic_json(paths["update"], {
+        **metadata,
+        "pid": 0,
+        "error": "" if code == 0 else "Engine installation failed. See ~/.local/state/omastrix/engine-update.log",
+        "commit": commit,
+    })
+    return 0 if code == 0 else 1
+
+
+def emit_result(result):
+    print(json.dumps(result))
+    return 0 if result.get("success") is True else 1
+
+
+def main():
+    verb = sys.argv[1] if len(sys.argv) > 1 else "snapshot"
+    if verb == "model-status":
+        print(json.dumps(library.model_status(), separators=(",", ":")))
+        return 0
+    if verb in ("snapshot", "status"):
+        print(json.dumps(snapshot(), separators=(",", ":")))
+        return 0
+    if verb in ("plugin-check", "plugin-update", "plugin-update-run"):
+        import plugin_update
+
+        action = {"plugin-check": plugin_update.check, "plugin-update": plugin_update.start_update,
+                  "plugin-update-run": plugin_update.update_run}[verb]
+        return emit_result(action())
+    if verb == "set-gtt":
+        if len(sys.argv) < 3 or sys.argv[2] not in GTT_CHOICES:
+            print("set-gtt needs 64, 96, or 110", file=sys.stderr)
+            return 2
+        label = sys.argv[2]
+        if "--print" in sys.argv:
+            limine, modprobe = file_bodies(label)
+            print(json.dumps({"limine": limine, "modprobe": modprobe}))
+            return 0
+        halo = host_probe()[-1]
+        if label not in supported_gtt_choices(halo, mem_total_bytes()):
+            print(json.dumps({"success": False, "error": "GTT choice is unsupported: Strix Halo and 14 GiB desktop reserve required."}))
+            return 1
+        if os.geteuid() != 0:
+            os.execvp("pkexec", ["pkexec", os.path.abspath(__file__), "set-gtt", label])
+        return write_gtt(label)
+    if verb in ("engine-start", "engine-stop", "engine-autostart", "engine-check", "engine-install", "engine-install-run", "engine-dependencies-run", "engine-update", "engine-update-run"):
+        if verb in ("engine-install-run", "engine-dependencies-run", "engine-update-run") and len(sys.argv) != 3:
+            print("engine worker needs exactly one immutable commit", file=sys.stderr)
+            return 2
+        arg = sys.argv[2] if len(sys.argv) > 2 else ""
+        return engine_action(verb, arg)
+    if verb == "library-fetch":
+        return library.fetch(sys.argv[2] if len(sys.argv) > 2 else "")
+    if verb == "library-add":
+        return emit_result(library.add_from_url(sys.argv[2] if len(sys.argv) > 2 else ""))
+    if verb == "library-download":
+        return emit_result(library.start_download(sys.argv[2] if len(sys.argv) > 2 else ""))
+    if verb == "library-load":
+        if not host_probe()[-1]:
+            return emit_result({"success": False, "error": "Model loading requires an amdgpu Strix Halo host; unsupported hardware is install-only preview."})
+        model_id = sys.argv[2] if len(sys.argv) > 2 else ""
+        confirm = "--confirm" in sys.argv
+        snap = snapshot()
+        return emit_result(library.load_checked(model_id, snap.get("gtt_total_gib"), confirm))
+    if verb == "library-unload":
+        return emit_result(library.unload_model(sys.argv[2] if len(sys.argv) > 2 else ""))
+    if verb == "library-delete":
+        model_id = sys.argv[2] if len(sys.argv) > 2 else ""
+        confirm = "--confirm" in sys.argv
+        snap = snapshot()
+        return emit_result(library.delete_model(model_id, snap.get("gtt_total_gib"), confirm))
+    if verb == "webui-access":
+        return emit_result(webui.set_access(sys.argv[2] if len(sys.argv) > 2 else "", "--confirm" in sys.argv))
+    if verb == "webui-install-run":
+        return webui.install(confirm="--confirm" in sys.argv)
+    if verb == "webui-install":
+        return emit_result(webui.start_install(confirm="--confirm" in sys.argv))
+    if verb == "webui-start":
+        return emit_result(webui.start())
+    if verb == "webui-stop":
+        return emit_result(webui.stop())
+    if verb == "webui-check":
+        return emit_result(webui.check())
+    if verb == "webui-update":
+        return emit_result(webui.start_update())
+    if verb == "webui-update-run":
+        return webui.update_run(sys.argv[2] if len(sys.argv) > 2 else "")
+    print("unknown verb: %s" % verb, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
