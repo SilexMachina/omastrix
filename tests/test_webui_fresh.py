@@ -26,6 +26,19 @@ class FreshWebuiTests(unittest.TestCase):
             return 0, 'LoadState=not-found\nActiveState=inactive'
         raise AssertionError('Unexpected service operation: ' + args[0])
 
+    def test_confirmed_update_passes_approval_to_detached_worker(self):
+        with mock.patch.object(webui, 'status', return_value={'state': 'stopped'}), \
+             mock.patch.object(webui, 'latest_release', return_value=('0.14.0', '')), \
+             mock.patch.object(webui, 'version_of', return_value='0.13.0'), \
+             mock.patch.object(webui, 'find_uv', return_value=''), \
+             mock.patch.object(webui.dependencies, 'install') as install, \
+             mock.patch.object(webui.subprocess, 'Popen', return_value=mock.Mock(pid=123456)) as spawn:
+            result = webui.start_update(confirm=True)
+            self.assertTrue(result['success'])
+            self.assertEqual(spawn.call_args.args[0][-3:], ['webui-update-run', '0.14.0', '--confirm'])
+            self.assertTrue(spawn.call_args.kwargs['start_new_session'])
+            install.assert_not_called()
+
     def test_missing_distribution_metadata_never_starts_python(self):
         venv = Path(self.temp.name) / '.local/share/omastrix/webui/venvs' / ('b' * 32)
         (venv / 'bin').mkdir(parents=True)

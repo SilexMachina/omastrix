@@ -774,9 +774,9 @@ def main():
     if verb == "webui-check":
         return emit_result(webui.check())
     if verb == "webui-update":
-        return emit_result(webui.start_update())
+        return emit_result(webui.start_update(confirm="--confirm" in sys.argv))
     if verb == "webui-update-run":
-        return webui.update_run(sys.argv[2] if len(sys.argv) > 2 else "")
+        return webui.update_run(sys.argv[2] if len(sys.argv) > 2 else "", confirm="--confirm" in sys.argv)
     print("unknown verb: %s" % verb, file=sys.stderr)
     return 2
 

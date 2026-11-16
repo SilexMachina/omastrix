@@ -343,6 +343,37 @@ sys.exit(99)
                 self.assertTrue(self.state(True)["error"])
                 self.assertEqual(self.state(True)["pid"], 0)
 
+    def test_confirmed_update_installs_missing_uv_then_builds_exact_version(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        old = (self.prefix / "venv").resolve()
+        (self.tools / "uv").rename(self.tools / "hidden-uv")
+        self.log.unlink()
+        out = self.run_worker(action="webui.update_run('0.14.0', confirm=True)")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(['pkexec', '/usr/bin/omarchy', 'pkg', 'add', 'uv'], self.commands())
+        self.assertTrue(any(c[-1] == 'open-webui==0.14.0' for c in self.commands()))
+        self.assertEqual((old / 'version').read_text(), '0.13.0')
+        self.assertEqual((self.prefix / 'venv/version').read_text(), '0.14.0')
+        self.assertEqual(self.state(True)['error'], '')
+        self.assertFalse(any(c[0] == 'systemctl' and c[1] in ('start', 'stop', 'restart') for c in self.commands()))
+
+    def test_missing_uv_update_failures_preserve_current_install(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        old = (self.prefix / 'venv').resolve()
+        (self.tools / 'uv').rename(self.tools / 'hidden-uv')
+        for confirm, settings in ((False, {}), (True, {'deny': True}), (True, {'unregistered': True})):
+            with self.subTest(confirm=confirm, settings=settings):
+                self.settings = settings
+                self.log.unlink(missing_ok=True)
+                out = self.run_worker(action="webui.update_run('0.14.0', confirm=%r)" % confirm)
+                self.assertNotEqual(out.returncode, 0)
+                self.assertEqual((self.prefix / 'venv').resolve(), old)
+                self.assertEqual((old / 'version').read_text(), '0.13.0')
+                self.assertEqual(self.state(True)['pid'], 0)
+                self.assertTrue(self.state(True)['error'])
+                self.assertFalse(any(c[0] == 'uv' for c in self.commands()))
+                self.assertEqual(any(c[0] == 'pkexec' for c in self.commands()), confirm)
+
     def test_update_builds_new_venv_without_mutating_old_or_user_data(self):
         self.assertEqual(self.run_worker().returncode, 0)
         old = (self.prefix / "venv").resolve()
@@ -397,6 +428,20 @@ sys.exit(99)
         out = self.run_worker(action="0 if webui.status()['state'] == 'unavailable' else 1")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertFalse((self.home / "executed-foreign").exists())
+
+    def test_missing_uv_update_launcher_requests_approval_without_installing(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        (self.tools / "uv").rename(self.tools / "hidden-uv")
+        self.log.unlink()
+        action = "(setattr(webui, 'latest_release', lambda: ('0.14.0', '')), print(__import__('json').dumps(webui.start_update())), 0)[2]"
+        out = self.run_worker(action=action)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        result = json.loads(out.stdout)
+        self.assertTrue(result.get("needs_confirm"), result)
+        self.assertEqual(result["confirmation"], "dependencies")
+        self.assertEqual(result["packages"], ["uv"])
+        self.assertFalse(any(c[0] == "pkexec" for c in self.commands()))
+        self.assertFalse(any(c[0] == "uv" for c in self.commands()))
 
     def test_missing_uv_launcher_returns_package_approval_without_installing(self):
         (self.tools / "uv").rename(self.tools / "hidden-uv")

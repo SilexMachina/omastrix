@@ -913,7 +913,7 @@ def check():
 
 
 @serialized()
-def start_update():
+def start_update(confirm=False):
     if status().get("state") not in ("stopped", "failed"):
         return {
             "success": False,
@@ -930,13 +930,13 @@ def start_update():
     current_key = version_key(current)
     if current_key and latest_key and latest_key <= current_key:
         return {"success": True, "message": "Open WebUI is already the newest published version, %s." % current}
-    if not find_uv():
-        return {"success": False, "error": "Open WebUI update needs uv, and uv is not installed."}
+    if not find_uv() and not confirm:
+        return dependencies.approval(["uv"])
     os.makedirs(state_dir(), exist_ok=True)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(state_dir(), "webui-update.log"), "ab") as log:
         proc = subprocess.Popen(
-            [os.path.join(root, "bin/omastrix"), "webui-update-run", latest],
+            [os.path.join(root, "bin/omastrix"), "webui-update-run", latest] + (["--confirm"] if confirm else []),
             start_new_session=True,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -946,7 +946,7 @@ def start_update():
 
 
 @serialized(wait=True, worker=True, job="update")
-def update_run(version):
+def update_run(version, confirm=False):
     if version_key(version) is None:
         raise ValueError("Open WebUI update needs a stable exact version")
     code, active = systemctl("is-active", UNIT)
@@ -956,9 +956,17 @@ def update_run(version):
     current_venv()
     uv = find_uv()
     py = venv_python()
-    if not uv or not os.access(py, os.X_OK):
+    if not os.access(py, os.X_OK):
         library.atomic_json(update_state_path(), {'pid': 0, 'error': 'Open WebUI update could not find its Python.'})
         return 1
+    if not uv and confirm:
+        library.atomic_json(update_state_path(), {'pid': os.getpid(), 'error': '', 'phase': 'dependencies', 'version': version})
+        dependencies.install('webui')
+        require_stopped()
+        uv = find_uv()
+    if not uv:
+        raise ValueError('Open WebUI update requires uv; dependencies need approval or uv is unusable.')
+    library.atomic_json(update_state_path(), {'pid': os.getpid(), 'error': '', 'phase': 'build', 'version': version})
     venv = build_venv(uv, version, "webui-update.log")
     promote(venv, version, update_state_path(), update=True)
     return 0

@@ -3,6 +3,7 @@
 ## [0.5.0-preview.6] - Unreleased
 
 - Reduce status polling work, retain bounded update versions and clarify memory and security limits.
+- Request approval for missing Open WebUI update prerequisites and continue the upgrade after installation.
 
 ## [0.5.0-preview.5] - 2026-11-10
 

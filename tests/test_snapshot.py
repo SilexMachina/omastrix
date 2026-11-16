@@ -51,6 +51,19 @@ class SnapshotTests(IsolatedBackend):
         self.assertEqual(result["gtt_choices"], ["64", "96", "110"])
         self.assertEqual(result["gtt_requirements"]["110"], 124)
 
+    def test_webui_update_dispatch_preserves_dependency_approval(self):
+        for confirmed in (False, True):
+            for verb, function, args, response in (
+                ('webui-update', 'start_update', [], {'success': True}),
+                ('webui-update-run', 'update_run', ['0.14.0'], 0),
+            ):
+                argv = ['omastrix', verb] + args + (['--confirm'] if confirmed else [])
+                with self.subTest(verb=verb, confirmed=confirmed), mock.patch('sys.argv', argv), \
+                     mock.patch.object(backend.webui, function, return_value=response) as action, \
+                     mock.patch.object(backend, 'snapshot', side_effect=AssertionError('Unexpected snapshot')), self.quiet():
+                    self.assertEqual(backend.main(), 0)
+                    action.assert_called_once_with(*args, confirm=confirmed)
+
     def test_explicit_verification_dispatch_does_not_need_engine_or_snapshot(self):
         for verb, function, response in (("library-verify", "start_verify", {"success": True}),
                                          ("library-verify-run", "verify", 0)):
