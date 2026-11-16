@@ -11,7 +11,8 @@ and Open WebUI in one bar panel.
 **Experimental preview software for public testing.** The current version is in
 [manifest.json](manifest.json), with changes in [CHANGELOG.md](CHANGELOG.md). Fresh-machine,
 reboot/recovery and full catalog acceptance are still in progress. Keep a
-recovery path before changing boot/GTT settings. See the
+recovery path before changing boot/GTT settings. The loopback engine API is
+currently unauthenticated; review the [security boundaries](SECURITY.md). See the
 [user guide](docs/user-guide.md) for setup limitations and safe operation.
 
 Inference requires a supported AMD Strix Halo iGPU, amdgpu and Vulkan/RADV.

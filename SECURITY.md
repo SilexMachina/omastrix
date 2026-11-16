@@ -28,13 +28,34 @@ secrets from unrelated installs, or include WebUI databases, prompts, chat logs,
 auth tokens, or credential-bearing URLs in reports. GTT writes require explicit
 consent and privilege escalation; the panel itself must not run as root.
 
+## Engine API access
+
+The current preview runs the engine router and model-worker HTTP listeners on
+loopback without API authentication. The fork's permissive cross-origin policy
+can allow web pages with browser access to loopback to make engine requests.
+Local processes can also use those interfaces. WebUI login protects its own
+web interface; direct engine requests have separate, unauthenticated access.
+
+Keep engine ports private, avoid forwarding or tunnelling them, and use a
+trusted browser environment. Do not assume that configuring a router API key
+alone protects every model-worker listener. Complete engine authentication is
+outside the current preview's protection boundary.
+
+## GTT authorization boundary
+
+GTT changes currently run code from the user-owned plugin checkout with
+administrator privileges after a Polkit prompt. Modifying that checkout can
+change the code executed with that approval, including imported modules.
+Protect the checkout, review updates, and approve GTT changes only when you
+trust its contents. The current preview does not isolate these writes behind
+a root-owned helper. Normal panel, engine and WebUI processes run as your user.
+
 ## Reporting
 
-Do not post exploit details or secrets in public issues. Use GitHub's private
-vulnerability reporting for this repository **if enabled**. If no private
-reporting option is available, open an issue requesting a secure contact route
-without disclosing the vulnerability. No dedicated private reporting address or
-response-time commitment is currently advertised.
+Do not post exploit details or secrets in public issues. Use
+[private vulnerability reporting](https://github.com/SilexMachina/omastrix/security/advisories/new),
+which is enabled for this repository. No response-time commitment is currently
+advertised.
 
 Include affected commit/version, impact, minimal reproduction, and redacted
 logs. Do not test against other people's hosts or perform destructive/live-service

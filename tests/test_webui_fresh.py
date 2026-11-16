@@ -26,6 +26,83 @@ class FreshWebuiTests(unittest.TestCase):
             return 0, 'LoadState=not-found\nActiveState=inactive'
         raise AssertionError('Unexpected service operation: ' + args[0])
 
+    def test_missing_distribution_metadata_never_starts_python(self):
+        venv = Path(self.temp.name) / '.local/share/omastrix/webui/venvs' / ('b' * 32)
+        (venv / 'bin').mkdir(parents=True)
+        python = venv / 'bin/python'
+        python.write_text('fake interpreter')
+        python.chmod(0o755)
+        with mock.patch.object(webui.subprocess, 'run', side_effect=AssertionError('no interpreter startup')):
+            self.assertEqual(webui.version_of(str(venv / 'bin/open-webui')), '')
+
+    def test_distribution_metadata_cache_tracks_replacement_without_python(self):
+        venv = Path(self.temp.name) / '.local/share/omastrix/webui/venvs' / ('a' * 32)
+        (venv / 'bin').mkdir(parents=True)
+        python = venv / 'bin/python'
+        python.write_text('fake interpreter')
+        python.chmod(0o755)
+        metadata = venv / 'lib/python3.11/site-packages/open_webui-0.13.0.dist-info/METADATA'
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text('Name: open-webui\nVersion: 0.13.0\n')
+        with mock.patch.object(webui.subprocess, 'run', side_effect=AssertionError('no interpreter startup')):
+            self.assertEqual(webui.version_of(str(venv / 'bin/open-webui')), '0.13.0')
+            self.assertEqual(webui.version_of(str(venv / 'bin/open-webui')), '0.13.0')
+            metadata.write_text('Name: open-webui\nVersion: 0.14.0\n')
+            self.assertEqual(webui.version_of(str(venv / 'bin/open-webui')), '0.14.0')
+
+    def test_safe_path_allows_user_managed_prefix_links_but_not_app_links(self):
+        target = Path(self.temp.name) / 'settings'
+        target.mkdir()
+        (Path(self.temp.name) / '.config').symlink_to(target, target_is_directory=True)
+        candidate = Path(self.temp.name) / '.config/omastrix/webui.env'
+        self.assertEqual(webui.safe_path(str(candidate)), str(target / 'omastrix/webui.env'))
+        (target / 'omastrix').symlink_to(target / 'other', target_is_directory=True)
+        with self.assertRaises(ValueError):
+            webui.safe_path(str(candidate))
+
+    def test_open_file_reference_protects_a_running_version(self):
+        proc = Path(self.temp.name) / 'proc'
+        process = proc / '123'
+        (process / 'fd').mkdir(parents=True)
+        for name in ('cmdline', 'environ', 'maps'):
+            (process / name).write_bytes(b'')
+        old = Path(self.temp.name) / 'old-version'
+        old.mkdir()
+        (process / 'fd/7').symlink_to(old / 'model')
+        with mock.patch.object(webui, 'PROC_ROOT', str(proc)):
+            self.assertTrue(webui.versions_in_use([str(old)]))
+
+    def test_other_user_process_reference_also_blocks_pruning(self):
+        proc = Path(self.temp.name) / 'proc'
+        process = proc / '123'
+        (process / 'fd').mkdir(parents=True)
+        old = Path(self.temp.name) / 'old-version'
+        old.mkdir()
+        (process / 'environ').write_bytes(os.fsencode(str(old)))
+        for name in ('cmdline', 'maps'):
+            (process / name).write_bytes(b'')
+        with mock.patch.object(webui, 'PROC_ROOT', str(proc)), mock.patch.object(os, 'getuid', return_value=-1):
+            self.assertTrue(webui.versions_in_use([str(old)]))
+
+    def test_pruning_cannot_follow_a_managed_root_swapped_for_a_symlink(self):
+        import shutil
+        root = Path(webui.prefix()) / 'venvs'
+        old = root / ('a' * 32)
+        old.mkdir(parents=True)
+        (old / 'sentinel').write_text('keep external copy')
+        marker = '.omastrix-tree.json'
+        webui.library.atomic_json(str(old / marker), webui.tree_identity(str(old), marker))
+        external = Path(self.temp.name) / 'unrelated'
+        shutil.copytree(root, external)
+        saved = root.with_name('saved')
+        def swap(paths):
+            root.rename(saved)
+            root.symlink_to(external, target_is_directory=True)
+            return False
+        with mock.patch.object(webui, 'versions_in_use', side_effect=swap), mock.patch.object(webui, 'require_stopped'):
+            webui.prune_venvs(str(root / ('b' * 32)), None)
+        self.assertEqual((external / old.name / 'sentinel').read_text(), 'keep external copy')
+
     def test_confirmed_missing_unit_is_installable(self):
         with mock.patch.object(webui, 'systemctl', side_effect=self.missing):
             info = webui.status()

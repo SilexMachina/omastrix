@@ -1,4 +1,4 @@
-"""Isolated regressions for the four library review findings."""
+"""Isolated library publication and router safety contracts."""
 import configparser
 import copy
 import fcntl
@@ -12,7 +12,7 @@ from test_backend_safety import IsolatedBackend, library
 
 class PresetPublicationTests(IsolatedBackend):
     def test_publication_rejects_symlink_destination_and_ancestors(self):
-        for component in (".config", ".config/omastrix", ".config/omastrix/models.ini"):
+        for component in (".config/omastrix", ".config/omastrix/models.ini"):
             with self.subTest(component=component):
                 outside = self.home / "outside"
                 outside.mkdir(exist_ok=True)
@@ -160,18 +160,16 @@ class RouterIdentityTests(IsolatedBackend):
         self.assertEqual(requested, [self.other["id"]])
         reload.assert_not_called()
 
-    def test_loaded_status_and_counters_use_id_not_shared_name(self):
+    def test_loaded_status_and_slots_use_id_not_shared_name(self):
         with mock.patch.object(library, "server_list", return_value={self.other["id"]: "loaded"}), \
              mock.patch.object(library, "recommend_id", return_value=self.row["id"]), \
              mock.patch.object(library, "slot_state", return_value=True) as slots, \
-             mock.patch.object(library, "token_count", return_value=23) as tokens, \
              mock.patch.object(library, "service_ram_gb", return_value=2):
             view = library.library_view(110)
         self.assertEqual(view["loaded_id"], self.other["id"])
         self.assertEqual([row["id"] for row in view["rows"] if row["server_status"] == "loaded"], [self.other["id"]])
         slots.assert_called_once_with(self.other["id"])
-        tokens.assert_called_once_with(self.other["id"])
-        self.assertEqual(view["tokens_since_load"], 23)
+        self.assertNotIn('tokens_since_load', view)
 
     def test_unload_targets_selected_id(self):
         with mock.patch.object(library, "server_list", return_value={self.other["id"]: "loaded"}), \
@@ -218,7 +216,6 @@ class RouterIdentityTests(IsolatedBackend):
              mock.patch.object(library, "unload_name") as unload, \
              mock.patch.object(library, "recommend_id", return_value=self.row["id"]), \
              mock.patch.object(library, "slot_state", return_value=False) as slots, \
-             mock.patch.object(library, "token_count", return_value=12) as tokens, \
              mock.patch.object(library, "service_ram_gb", return_value=1):
             for _ in range(2):
                 view = library.library_view(110)
@@ -230,14 +227,13 @@ class RouterIdentityTests(IsolatedBackend):
         reload.assert_not_called()
         unload.assert_not_called()
         self.assertEqual(slots.call_args.args, (self.row["name"],))
-        self.assertEqual(tokens.call_args.args, (self.row["name"],))
+
 
     def test_existing_legacy_binding_is_not_reassigned_when_name_collides(self):
         self.legacy_preset(self.other)
         with mock.patch.object(library, "server_list", return_value={"model": "loaded"}), \
              mock.patch.object(library, "recommend_id", return_value=self.row["id"]), \
              mock.patch.object(library, "slot_state", return_value=False), \
-             mock.patch.object(library, "token_count", return_value=1), \
              mock.patch.object(library, "service_ram_gb", return_value=1), \
              mock.patch.object(library, "reload_server") as reload, \
              mock.patch.object(library, "http_json") as request:
@@ -307,7 +303,7 @@ class DownloadDeletePolicyTests(IsolatedBackend):
 
     def test_download_locked_delete_never_cancels_or_removes_files(self):
         path = self.file()
-        lock = self.home / ".local/state/omastrix/downloads.lock"
+        lock = self.home / ('.local/state/omastrix/downloads-' + self.row['id'] + '.lock')
         lock.parent.mkdir(parents=True)
         with lock.open("a") as fh:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)

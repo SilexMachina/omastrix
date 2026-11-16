@@ -271,7 +271,7 @@ class PluginUpdateTests(unittest.TestCase):
                                    "mem_total_bytes": None, "pages_limit": None,
                                    "configured_pages": None, "engine_info": {},
                                    "webui_info": {}}.items():
-                    stack.enter_context(patch.dict(snapshot_globals, {key: lambda value=value: value}))
+                    stack.enter_context(patch.dict(snapshot_globals, {key: lambda *args, value=value, **kwargs: value}))
                 stack.enter_context(patch.object(snapshot_globals["library"], "library_view", return_value={}))
                 stack.enter_context(patch.object(snapshot_globals["library"], "write_preset"))
                 self.assertEqual(app["snapshot"]()["plugin"], self.mod.status())

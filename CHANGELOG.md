@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.0-preview.6] - Unreleased
+
+- Reduce status polling work, retain bounded update versions and clarify memory and security limits.
+
 ## [0.5.0-preview.5] - 2026-11-10
 
 Experimental preview for Omarchy.

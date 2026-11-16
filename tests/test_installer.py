@@ -12,6 +12,64 @@ ROOT = Path(__file__).resolve().parents[1]
 PIN = json.loads((ROOT / "engine-pin.json").read_text())
 
 
+class PrivateProcessReferenceTests(unittest.TestCase):
+    """Exercise both identical scanners without consulting any real PID."""
+
+    def scan(self, mode):
+        import ast
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        results = []
+        for filename in ('webui.py', 'omastrix-engine-install'):
+            text = (ROOT / 'bin' / filename).read_text()
+            start = text.index('def versions_in_use(')
+            function = ast.parse(text[start:].split('\n\n\n', 1)[0]).body[0]
+            namespace = {'os': os, 'PROC_ROOT': '/fake-proc'}
+            exec(compile(ast.Module(body=[function], type_ignores=[]), filename, 'exec'), namespace)
+
+            class Entry:
+                name = '123'
+                reads = 0
+                def stat(self):
+                    self.reads += 1
+                    if mode == 'exited' or (mode == 'exit-during-read' and self.reads > 1):
+                        raise FileNotFoundError()
+                    if mode == 'unknown-owner':
+                        raise PermissionError()
+                    return SimpleNamespace(st_uid=0 if mode == 'root' else os.getuid() + (1 if mode == 'other' else 0))
+                def __truediv__(self, name):
+                    if mode in ('exit-during-read', 'own-missing-evidence'):
+                        raise FileNotFoundError()
+                    raise PermissionError('unreadable process evidence')
+                def exists(self):
+                    return mode != 'exit-during-read'
+
+            class Proc:
+                def __init__(self, path):
+                    assert path == '/fake-proc'
+                def iterdir(self):
+                    return iter([Entry()])
+
+            with patch('pathlib.Path', Proc), patch('os.getuid', return_value=1000):
+                results.append(namespace['versions_in_use'](['/private/old']))
+        return results
+
+    def test_other_uid_unreadable_process_does_not_block_private_cleanup(self):
+        self.assertEqual(self.scan('other'), [False, False])
+        self.assertEqual(self.scan('root'), [False, False])
+
+    def test_own_unreadable_process_defers_private_cleanup(self):
+        self.assertEqual(self.scan('own'), [True, True])
+        self.assertEqual(self.scan('own-missing-evidence'), [True, True])
+
+    def test_exited_process_does_not_permanently_block_private_cleanup(self):
+        self.assertEqual(self.scan('exited'), [False, False])
+        self.assertEqual(self.scan('exit-during-read'), [False, False])
+
+    def test_unknown_process_owner_defers_private_cleanup(self):
+        self.assertEqual(self.scan('unknown-owner'), [True, True])
+
+
 class InstallerProcessSafetyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -32,7 +90,13 @@ class InstallerProcessSafetyTests(unittest.TestCase):
         fixture.mkdir()
         (fixture / "sitecustomize.py").write_text('''import glob
 from pathlib import Path
-real_glob, real_path_glob = glob.glob, Path.glob
+real_glob, real_path_glob, real_iterdir = glob.glob, Path.glob, Path.iterdir
+def isolated_iterdir(path):
+    if str(path) == '/proc':
+        path = Path.home() / 'proc'
+        path.mkdir(exist_ok=True)
+    return real_iterdir(path)
+Path.iterdir = isolated_iterdir
 def isolated_glob(pattern, *args, **kwargs):
     if str(pattern).startswith("/sys/class/drm/"):
         pattern = str(Path.home()) + str(pattern)
@@ -64,6 +128,8 @@ os.environ.setdefault("COMMAND_LOG", str(Path.home() / "commands.jsonl"))
 settings = json.loads(Path(os.environ["CONTROL"]).read_text())
 with open(os.environ["COMMAND_LOG"], "a") as out:
     out.write(json.dumps([name] + args) + "\\n")
+if name == "nproc":
+    print(settings.get('nproc', 12)); sys.exit(0)
 if name == "systemctl":
     if "is-active" in args:
         print(settings["state"])
@@ -101,7 +167,7 @@ if name == "cmake":
     sys.exit(settings.get("build_code", 0))
 sys.exit(0)
 '''
-        for name in ("git", "cmake", "systemctl", "ninja", "c++", "cc", "glslc", "pkg-config", "pacman", "lspci"):
+        for name in ("nproc", "git", "cmake", "systemctl", "ninja", "c++", "cc", "glslc", "pkg-config", "pacman", "lspci"):
             path = self.tools / name
             path.write_text(stub)
             path.chmod(0o755)
@@ -357,6 +423,17 @@ sys.exit(0)
         self.assertNotEqual(result.returncode, 0)
         self.assert_no_build()
         self.assertEqual(target.read_text(), "untouched")
+
+    def test_non_strix_missing_dependency_hint_omits_radv(self):
+        (self.device / 'uevent').write_text('DRIVER=i915\nPCI_ID=8086:1234\n')
+        (self.tools / 'glslc').unlink()
+        for name in ('dirname', 'mkdir', 'flock'):
+            (self.tools / name).symlink_to(shutil.which(name))
+        self.path = str(self.tools)
+        out = self.run_installer()
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn('shaderc', out.stderr)
+        self.assertNotIn('vulkan-radeon', out.stderr)
 
     def test_missing_build_dependency_stops_before_clone(self):
         (self.tools / "glslc").unlink()
@@ -724,6 +801,72 @@ else:
         self.assertFalse((self.home / ".config/omastrix/engine.json").exists())
         self.assertEqual(list(wrapper.iterdir()), [])
 
+
+    def test_successful_updates_prune_only_unchanged_managed_builds(self):
+        for _ in range(3):
+            out = self.run_installer(PIN['commit'])
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        source = self.home / '.local/share/omastrix/src'
+        self.assertEqual(len(list(source.iterdir())), 2)
+
+    def test_running_old_build_environment_defers_all_pruning(self):
+        self.assertEqual(self.run_installer(PIN['commit']).returncode, 0)
+        source = self.home / '.local/share/omastrix/src'
+        oldest = next(source.iterdir())
+        self.assertEqual(self.run_installer(PIN['commit']).returncode, 0)
+        process = self.home / 'proc/123'
+        (process / 'fd').mkdir(parents=True)
+        for name in ('cmdline', 'maps'):
+            (process / name).write_bytes(b'')
+        (process / 'environ').write_bytes(b'ENGINE_ROOT=' + os.fsencode(str(oldest)) + b'\0')
+        result = self.run_installer(PIN['commit'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(oldest.exists())
+        self.assertEqual(len(list(source.iterdir())), 3)
+
+    def test_pruning_preserves_user_files_symlink_targets_and_failed_publications(self):
+        self.assertEqual(self.run_installer(PIN['commit']).returncode, 0)
+        source = self.home / '.local/share/omastrix/src'
+        oldest = next(source.iterdir())
+        (oldest / 'user-notes').write_text('keep')
+        external = self.home / 'unrelated'
+        external.mkdir()
+        (external / 'sentinel').write_text('safe')
+        link = source / ('strix-llama.cpp-' + 'a' * 40 + '.abcdef')
+        link.symlink_to(external, target_is_directory=True)
+        unknown = source / ('strix-llama.cpp-' + 'b' * 40 + '.abcdef')
+        unknown.mkdir()
+        (unknown / 'sentinel').write_text('unmanaged')
+        self.assertEqual(self.run_installer(PIN['commit']).returncode, 0)
+        self.settings['reload_code'] = 1
+        self.assertNotEqual(self.run_installer(PIN['commit']).returncode, 0)
+        self.assertTrue(oldest.exists())
+        self.settings['reload_code'] = 0
+        self.assertEqual(self.run_installer(PIN['commit']).returncode, 0)
+        self.assertEqual((oldest / 'user-notes').read_text(), 'keep')
+        self.assertEqual((external / 'sentinel').read_text(), 'safe')
+        self.assertTrue(link.is_symlink())
+        self.assertEqual((unknown / 'sentinel').read_text(), 'unmanaged')
+
+    def test_user_symlink_reference_keeps_an_old_engine_build(self):
+        self.assertEqual(self.run_installer(PIN['commit']).returncode, 0)
+        source = self.home / '.local/share/omastrix/src'
+        oldest = next(source.iterdir())
+        (source / 'user-selected').symlink_to(oldest, target_is_directory=True)
+        for _ in range(2):
+            out = self.run_installer(PIN['commit'])
+            self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(oldest.exists())
+
+    def test_default_parallelism_reserves_two_cpus_and_caps_at_eight(self):
+        for count, expected in ((1, '1'), (4, '2'), (32, '8')):
+            self.extra_env.pop('CMAKE_BUILD_PARALLEL_LEVEL', None)
+            self.settings['nproc'] = count
+            self.log.unlink(missing_ok=True)
+            out = self.run_installer(PIN['commit'])
+            self.assertEqual(out.returncode, 0, out.stderr)
+            build = next(row for row in self.commands() if row[0] == 'cmake' and '--build' in row)
+            self.assertEqual(build[build.index('--parallel') + 1], expected)
 
     def test_build_parallelism_is_bounded_and_targets_are_explicit(self):
         self.extra_env["CMAKE_BUILD_PARALLEL_LEVEL"] = "3"

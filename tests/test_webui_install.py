@@ -11,6 +11,47 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class VenvInventoryTests(unittest.TestCase):
+    def setUp(self):
+        import ast
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        module = ast.parse((ROOT / 'bin/webui.py').read_text())
+        functions: list[ast.stmt] = [node for node in module.body if isinstance(node, ast.FunctionDef)
+                     and node.name in ('tree_identity', 'venv_inventory_matches')]
+        self.namespace: dict = {'os': os}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'webui.py', 'exec'), self.namespace)
+        (self.root / '__pycache__').mkdir()
+        (self.root / '__pycache__/tracked.pyc').write_bytes(b'original')
+        (self.root / 'tracked.py').write_text('original')
+        self.expected = self.namespace['tree_identity'](self.root, '.inventory')
+
+    def matches(self):
+        return self.namespace['venv_inventory_matches'](self.root, '.inventory', self.expected)
+
+    def test_modified_tracked_bytecode_is_preserved(self):
+        (self.root / '__pycache__/tracked.pyc').write_bytes(b'modified')
+        self.assertFalse(self.matches())
+
+    def test_modified_tracked_source_is_preserved(self):
+        (self.root / 'tracked.py').write_text('modified')
+        self.assertFalse(self.matches())
+
+    def test_noncache_files_in_cache_directory_are_preserved(self):
+        (self.root / '__pycache__/notes').write_text('keep')
+        self.assertFalse(self.matches())
+
+    def test_bytecode_symlink_and_external_target_are_preserved(self):
+        (self.root / '__pycache__/new.pyc').symlink_to(self.root / 'tracked.py')
+        self.assertFalse(self.matches())
+        self.assertEqual((self.root / 'tracked.py').read_text(), 'original')
+
+    def test_new_regular_bytecode_is_ignored(self):
+        (self.root / '__pycache__/new.pyc').write_bytes(b'generated')
+        self.assertTrue(self.matches())
+
+
 class WebuiInstallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -62,12 +103,16 @@ if args[:2] == ["pip", "install"]:
     p = Path(args[args.index("--python")+1]).parent.parent
     version = args[-1].split("==")[-1]
     (p / "version").write_text(version)
+    metadata = p / ("lib/python3.11/site-packages/open_webui-%s.dist-info/METADATA" % version)
+    metadata.parent.mkdir(parents=True, exist_ok=True)
+    metadata.write_text("Name: open-webui\\nVersion: %s\\n" % c.get("actual_version", version))
     if c.get("missing_cli"): (p / "bin/open-webui").unlink()
     if c.get("start_during_build"):
         c["state"] = "active"; c["state_code"] = 0
         Path(os.environ["CONTROL"]).write_text(json.dumps(c))
     if c.get("redirect_config"):
-        config = Path(os.environ["HOME"]) / ".config"
+        config = Path(os.environ["HOME"]) / ".config/omastrix"
+        config.parent.mkdir(parents=True, exist_ok=True)
         config.symlink_to(Path(os.environ["HOME"]) / "unrelated", target_is_directory=True)
     sys.exit(c.get("install_code", 0))
 if args[:2] == ["pip", "check"]: sys.exit(c.get("check_code", 0))
@@ -83,6 +128,9 @@ sys.exit(99)
     def run_worker(self, version=None, action=None):
         self.control.write_text(json.dumps(self.settings))
         expr = action or ("webui.install()" if version is None else "webui.update_run(%r)" % version)
+        proc = self.home / 'proc'
+        proc.mkdir(exist_ok=True)
+        expr = "(setattr(webui, 'PROC_ROOT', " + repr(str(proc)) + "), " + expr + ")[1]"
         return subprocess.run(
             [sys.executable, "-c", "import webui; raise SystemExit(" + expr + ")"],
             env={"HOME": str(self.home), "PATH": str(self.tools),
@@ -117,6 +165,69 @@ sys.exit(99)
         self.assertTrue(legacy.is_symlink())
         self.assertEqual((legacy / "version").read_text(), "0.14.0")
         self.assertTrue(any((p / "version").read_text() == "0.13.0" for p in (self.prefix / "venvs").iterdir()))
+
+    def test_runtime_bytecode_additions_do_not_prevent_venv_cleanup(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        oldest = (self.prefix / 'venv').resolve()
+        cache = oldest / 'lib/pkg/__pycache__'
+        # Parent package directories are inventoried before runtime starts.
+        (oldest / 'lib/pkg').mkdir(parents=True)
+        identity = self.run_worker(action="__import__('json').dump(webui.tree_identity(%r, '.omastrix-tree.json'), open(%r, 'w'))" % (str(oldest), str(oldest / '.omastrix-tree.json')))
+        self.assertEqual(identity.returncode, 0, identity.stderr)
+        cache.mkdir()
+        (cache / 'module.cpython-314.pyc').write_bytes(b'generated cache')
+        (oldest / 'lib/pkg/legacy.pyc').write_bytes(b'legacy cache')
+        self.assertEqual(self.run_worker('0.14.0').returncode, 0)
+        out = self.run_worker('0.15.0')
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(oldest.exists())
+
+    def test_successful_updates_keep_current_and_one_previous_venv(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        oldest = (self.prefix / 'venv').resolve()
+        self.assertEqual(self.run_worker('0.14.0').returncode, 0)
+        previous = (self.prefix / 'venv').resolve()
+        out = self.run_worker('0.15.0')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertFalse(oldest.exists())
+        self.assertTrue(previous.exists())
+        self.assertEqual(len(list((self.prefix / 'venvs').iterdir())), 2)
+
+    def test_running_process_open_file_defers_pruning(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        old = (self.prefix / 'venv').resolve()
+        self.assertEqual(self.run_worker('0.14.0').returncode, 0)
+        process = self.home / 'proc/123'
+        (process / 'fd').mkdir(parents=True)
+        for name in ('cmdline', 'environ', 'maps'):
+            (process / name).write_bytes(b'')
+        (process / 'fd/7').symlink_to(old / 'bin/python')
+        out = self.run_worker('0.15.0')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue(old.exists())
+
+    def test_unrecognized_user_files_and_failed_reload_are_preserved(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        oldest = (self.prefix / 'venv').resolve()
+        (oldest / 'user-notes').write_text('keep')
+        self.assertEqual(self.run_worker('0.14.0').returncode, 0)
+        previous = (self.prefix / 'venv').resolve()
+        self.settings = {'reload_code': 1}
+        self.assertNotEqual(self.run_worker('0.15.0').returncode, 0)
+        self.assertTrue(previous.exists())
+        self.settings = {}
+        self.assertEqual(self.run_worker('0.15.0').returncode, 0)
+        self.assertEqual((oldest / 'user-notes').read_text(), 'keep')
+
+    def test_user_symlink_reference_keeps_old_venv_and_its_target(self):
+        self.assertEqual(self.run_worker().returncode, 0)
+        oldest = (self.prefix / 'venv').resolve()
+        alias = self.prefix / 'venvs/user-selected'
+        alias.symlink_to(oldest, target_is_directory=True)
+        self.assertEqual(self.run_worker('0.14.0').returncode, 0)
+        self.assertEqual(self.run_worker('0.15.0').returncode, 0)
+        self.assertTrue(alias.is_symlink())
+        self.assertTrue(oldest.exists())
 
     def test_missing_unit_first_install_completes_without_starting_service(self):
         self.settings = {"state": "inactive", "state_code": 4,
@@ -170,7 +281,7 @@ sys.exit(99)
         self.assertIn("state disk full", self.state(True)["error"])
 
     def test_ancestor_symlinks_refused_before_lock_or_tools(self):
-        for relative in (".local", ".local/state", ".local/share", ".config", ".config/systemd", ".local/share/omastrix/bin"):
+        for relative in (".local/state/omastrix", ".local/share/omastrix", ".config/omastrix", ".config/systemd", ".local/share/omastrix/bin"):
             with self.subTest(relative=relative):
                 link = self.home / relative
                 target = self.home / "unrelated"
@@ -384,6 +495,10 @@ sys.exit(99)
     def test_legacy_migration_rebuilds_same_version_instead_of_reusing_relocated_venv(self):
         legacy = self.make_legacy()
         (legacy / "version").write_text("0.14.0")
+        distribution = next(legacy.glob('lib/python*/site-packages/open_webui-*.dist-info'))
+        replacement = distribution.with_name('open_webui-0.14.0.dist-info')
+        distribution.rename(replacement)
+        (replacement / 'METADATA').write_text('Name: open-webui\nVersion: 0.14.0\n')
         self.log.unlink()
         out = self.run_worker()
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)

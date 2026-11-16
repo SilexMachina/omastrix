@@ -97,12 +97,6 @@ except (OSError, ValueError, AttributeError) as exc:
 PY
 )
 REPO=https://github.com/halo-box/strix-llama.cpp.git
-for dependency in git cmake ninja c++ glslc pkg-config systemctl; do
-  command -v "$dependency" >/dev/null 2>&1 || {
-    echo "Missing build dependency: $dependency. Run: omarchy pkg add base-devel git cmake ninja vulkan-headers vulkan-tools spirv-headers shaderc vulkan-radeon" >&2
-    exit 1
-  }
-done
 # Embed the backend probe without importing service/model code. Wrappers re-probe
 # the current host and remain independent of this checkout after installation.
 HOST_PROBE_CODE=$(python3 - "${PIN_FILE%/*}/bin/omastrix" << 'PY'
@@ -120,6 +114,14 @@ PY
 )
 HARDWARE_SUPPORTED=$(python3 -c "$HOST_PROBE_CODE
 print('yes' if host_probe()[-1] else 'no')")
+RADV_HINT=
+[ "$HARDWARE_SUPPORTED" != yes ] || RADV_HINT=" vulkan-radeon"
+for dependency in git cmake ninja c++ glslc pkg-config systemctl; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    echo "Missing build dependency: $dependency. Run: omarchy pkg add base-devel git cmake ninja vulkan-headers vulkan-tools spirv-headers shaderc$RADV_HINT" >&2
+    exit 1
+  }
+done
 RADV_ICD=
 if [ "$HARDWARE_SUPPORTED" = yes ]; then
 # Arch has shipped both radeon_icd.json and radeon_icd.x86_64.json.
@@ -184,7 +186,12 @@ ACTUAL_COMMIT=$(git -C "$SRC" rev-parse --verify 'HEAD^{commit}')
 
 cmake -B "$SRC/build" -S "$SRC" -G Ninja \
   -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build "$SRC/build" --config Release --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" \
+BUILD_PARALLEL=${CMAKE_BUILD_PARALLEL_LEVEL:-}
+if [ -z "$BUILD_PARALLEL" ]; then
+  BUILD_PARALLEL=$(nproc)
+  BUILD_PARALLEL=$(python3 -c 'import sys; print(min(8, max(1, int(sys.argv[1]) - 2)))' "$BUILD_PARALLEL")
+fi
+cmake --build "$SRC/build" --config Release --parallel "$BUILD_PARALLEL" \
   --target llama-server llama-cli llama-bench
 
 # Probe the staged binary before publishing wrappers, units, or a success record.
@@ -274,7 +281,7 @@ if sys.argv[1]:
     print("export AMD_VULKAN_ICD=RADV")
 PY
 python3 - "$SRC" "$VERSION" "$COMMIT" "$HARDWARE_ACCEPTANCE" << 'PY'
-import json, os, shutil, signal, stat, subprocess, sys, tempfile, time
+import json, os, re, shutil, signal, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 source, version, commit = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 home = Path.home()
@@ -378,6 +385,120 @@ finally:
                 path.unlink(missing_ok=True)
             except OSError as exc:
                 print("Could not remove publication temporary " + str(path) + ": " + str(exc), file=sys.stderr)
+# Inventory only successfully published immutable trees. Older/unrecognized
+# directories remain user-owned and are never adopted for automatic deletion.
+def tree_identity(root, marker):
+    """Inventory without following links; added or changed user files block pruning."""
+    result = {}
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            relative = os.path.relpath(path, root)
+            if relative == marker:
+                continue
+            info = os.lstat(path)
+            result[relative] = [info.st_mode, info.st_size if not os.path.isdir(path) else 0,
+                                info.st_mtime_ns if not os.path.isdir(path) else 0,
+                                os.readlink(path) if os.path.islink(path) else '']
+    return result
+
+
+PROC_ROOT = '/proc'
+
+
+def versions_in_use(paths):
+    """Protect readable process references; defer on uncertain own processes."""
+    from pathlib import Path
+    needles = [os.fsencode(os.path.realpath(path)) for path in paths]
+    try:
+        for entry in Path(PROC_ROOT).iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                owner = entry.stat().st_uid
+            except FileNotFoundError:
+                continue
+            evidence, uncertain = [], False
+            for name in ('exe', 'cwd'):
+                try:
+                    link = entry / name
+                    if link.is_symlink():
+                        evidence.append(os.fsencode(os.readlink(link)))
+                except OSError:
+                    uncertain = True
+            try:
+                for link in (entry / 'fd').iterdir():
+                    try:
+                        evidence.append(os.fsencode(os.readlink(link)))
+                    except FileNotFoundError:
+                        continue  # A closed descriptor is no longer a reference.
+                    except OSError:
+                        uncertain = True
+            except OSError:
+                uncertain = True
+            for name in ('cmdline', 'environ', 'maps'):
+                try:
+                    evidence.append((entry / name).read_bytes())
+                except OSError:
+                    uncertain = True
+            if any(path in chunk for path in needles for chunk in evidence):
+                return True
+            if uncertain and owner == os.getuid():
+                try:
+                    entry.stat()
+                except FileNotFoundError:
+                    continue
+                return True
+    except OSError:
+        return True
+    return False
+
+
+
+root_fd = None
+try:
+    marker = '.omastrix-build.json'
+    (source / marker).write_text(json.dumps(tree_identity(str(source), marker)))
+    managed = source.parent
+    root_fd = os.open(managed, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    candidates = []
+    for path in managed.iterdir():
+        if path == source or path.is_symlink() or not path.is_dir():
+            continue
+        if not re.fullmatch(r'strix-llama\.cpp-[0-9a-f]{40}\.[A-Za-z0-9]{6}', path.name):
+            continue
+        inventory = path / marker
+        if inventory.is_symlink() or not inventory.is_file():
+            continue
+        try:
+            expected = json.loads(inventory.read_text())
+            if expected == tree_identity(str(path), marker):
+                candidates.append(path)
+        except (OSError, ValueError):
+            continue
+    # Keep the immediately previous published tree even when wrappers were
+    # customized; retain every tree still referenced by any published wrapper.
+    candidates.sort(key=lambda p: (p / marker).stat().st_mtime_ns, reverse=True)
+    referenced = b''.join(path.read_bytes() for path, _, _ in files if path.name.startswith('llama-'))
+    obsolete = [p for p in candidates[1:] if os.fsencode(str(p)) not in referenced]
+    references = []
+    for directory, dirs, names in os.walk(managed, followlinks=False):
+        for name in dirs + names:
+            link = os.path.join(directory, name)
+            if os.path.islink(link):
+                references.append((link, os.path.realpath(link)))
+    obsolete = [path for path in obsolete if not any(
+        (target == str(path) or target.startswith(str(path) + os.sep))
+        and not link.startswith(str(path) + os.sep) for link, target in references)]
+    if obsolete and not versions_in_use(obsolete):
+        for path in obsolete:
+            if not path.is_symlink() and json.loads((path / marker).read_text()) == tree_identity(str(path), marker):
+                shutil.rmtree(path.name, dir_fd=root_fd)
+except (OSError, ValueError):
+    pass  # Cleanup must never turn a successful publication into a rollback.
+finally:
+    if root_fd is not None:
+        os.close(root_fd)
 PY
 KEEP_BUILD=1
 

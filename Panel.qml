@@ -107,6 +107,7 @@ Panel {
     if (scope === "engine") return engine.update_error || ""
     if (scope === "webui") return webui.error || ""
     if (scope === "plugin") return pluginInfo.error || ""
+    if (scope === "library") return (payload.library || {}).error || ""
     for (var i = 0; i < models.length; ++i)
       if (models[i].id === scope) return models[i].error || ""
     return ""
@@ -445,7 +446,7 @@ Panel {
                         text: modelData + " GiB"
                         selected: String(root.payload.gtt_set) === modelData
                         enabled: !root.busy && !!root.payload.gtt_choices && root.payload.gtt_choices.indexOf(modelData) >= 0
-                        tooltipText: enabled ? "Configure the GTT ceiling" : "Requires more system memory"
+                        tooltipText: View.gttChoiceTooltip(modelData, root.payload, root.busy)
                         onClicked: root.requestGtt(modelData)
                       }
                     }
@@ -500,6 +501,7 @@ Panel {
                 }
                 ActionButton { text: "Add model"; enabled: !root.busy && root.addLink.trim() !== ""; onClicked: root.addModel() }
               }
+              Feedback { width: parent.width; scope: "library" }
               Feedback { width: parent.width; scope: "add" }
 
               // The same column widths are used by the header and every row.

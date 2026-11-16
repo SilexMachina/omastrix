@@ -26,6 +26,7 @@ class ReleaseTests(unittest.TestCase):
         result = self.run_tool("check")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("0.4.0-dev.1", result.stdout)
+        self.assertIn("metadata only; no tag/release created", result.stdout)
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.root.iterdir()})
 
     def test_check_rejects_invalid_semver(self):

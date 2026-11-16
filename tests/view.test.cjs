@@ -90,6 +90,16 @@ test('keyboard activation targets native focus and never clicks a disabled contr
   assert.equal(controls[2].clicks, undefined);
 });
 
+test('disabled GTT choices explain required and detected system memory', () => {
+  const snapshot = {strix_halo:true, gtt_choices:['64','96'], gtt_requirements:{'110':124}, mem_total_gib:112.5};
+  assert.match(context.gttChoiceTooltip('110', snapshot, false), /124 GiB/);
+  assert.match(context.gttChoiceTooltip('110', snapshot, false), /112.5 GiB/);
+  assert.match(context.gttChoiceTooltip('110', snapshot, false), /BIOS/);
+  assert.equal(context.gttChoiceTooltip('64', snapshot, false), 'Configure the GTT ceiling');
+  assert.match(context.gttChoiceTooltip('110', snapshot, true), /Wait/);
+  assert.match(context.gttChoiceTooltip('110', {strix_halo:false}, false), /Strix Halo/);
+});
+
 test('missing GTT readings stay unavailable while measured zero remains zero', () => {
   for (const value of [null, undefined, '', ' ', 'unknown', NaN, Infinity, -1, false])
     assert.equal(context.formatGttUsed(value), '—', `Unavailable: ${String(value)}`);

@@ -463,6 +463,17 @@ ShellRoot {
         }
         plugin.payload = healthy
       }
+      function test_04d_library_failure_keeps_system_controls() {
+        var original = plugin.payload
+        var message = "TEST FIXTURE model storage unavailable"
+        plugin.payload = Object.assign({}, original, {library: {rows: [], error: message}})
+        wait(80)
+        compare(plugin.messageFor("library"), message)
+        verify(labels(message).length > 0, "Library error is visible beside models")
+        verify(labels("System").length > 0)
+        verify(visibleControl("Check updates").enabled)
+        plugin.payload = original
+      }
       function test_04c_poll_preserves_model_focus() {
         var loaded = visibleControl("Unload")
         loaded.forceActiveFocus()
@@ -818,7 +829,7 @@ def run_case(base, name, light, width, quickshell, installed, font_size=12):
     platform_warnings = [line for line in output.splitlines() if line.strip() == "WARN: This plugin does not support setting window masks"]
     bad_log = [line for line in output.splitlines() if re.search(r"\b(?:WARN|ERROR|FAIL!)\b", line) and line not in platform_warnings]
     outcomes = re.findall(r"SMOKE_END (test_\w+) failed=(true|false)", output)
-    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 21)
+    ok = (code == 0 and "SMOKE_COMPLETE" in output and len(outcomes) == (1 if unsupported else 22)
           and all(failed == "false" for _, failed in outcomes)
           and not unexpected and not bad_log and screenshot.exists()
           and not (plugin / "overlapping-status-workers").exists()

@@ -21,7 +21,7 @@ import dependencies
 
 UNIT = "omastrix-webui.service"
 PORT = 3000
-# Approved product baseline; explicit updates never reset an installed version.
+# Default first-install version; explicit updates preserve installed versions.
 INITIAL_VERSION = "0.13.0"
 PYTHON_VERSION = "3.11"
 
@@ -52,18 +52,8 @@ except (sqlite3.Error, ValueError):
 
 
 def safe_path(path, allow_leaf_link=False):
-    """Reject redirection in every ancestor, including HOME and its parents."""
-    path = os.path.abspath(path)
-    current = os.path.sep
-    parts = path.split(os.path.sep)[1:]
-    for index, part in enumerate(parts):
-        current = os.path.join(current, part)
-        leaf = index == len(parts) - 1
-        if os.path.islink(current) and not (leaf and allow_leaf_link):
-            raise ValueError("Open WebUI path contains a symlink: " + current)
-        if not leaf and os.path.lexists(current) and not os.path.isdir(current):
-            raise ValueError("Open WebUI ancestor is not a directory: " + current)
-    return path
+    """Canonicalize trusted user prefixes, rejecting redirection in app storage."""
+    return library.checked_app_path(os.path.abspath(path), allow_leaf_link=allow_leaf_link)
 
 
 def safe_layout():
@@ -182,21 +172,37 @@ def port_open():
     return False
 
 
+_VERSION_CACHE = {}
+
+
 def version_of(path):
-    py = os.path.join(os.path.dirname(path), "python")
-    if not os.access(py, os.X_OK):
-        return ""
+    # Distribution metadata is enough: never boot the venv interpreter to poll.
+    from pathlib import Path
+    from email.parser import Parser
     try:
-        out = subprocess.run(
-            [py, "-c", "import importlib.metadata as m; print(m.version('open-webui'))"],
-            capture_output=True, text=True, timeout=15, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    text = (out.stdout or "").strip()
-    if out.returncode != 0 or version_key(text) is None:
-        return ""
-    return text
+        venv = safe_path(os.path.realpath(os.path.dirname(os.path.dirname(path))))
+        matches = list(Path(venv).glob('lib/python*/site-packages/open_webui-*.dist-info/METADATA'))
+        if matches:
+            if len(matches) != 1:
+                return ''
+            metadata = safe_path(str(matches[0]))
+            info = os.stat(metadata)
+            if not os.path.isfile(metadata) or info.st_size > 1024 * 1024:
+                return ''
+            identity = (venv, metadata, info.st_dev, info.st_ino, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns)
+            if identity not in _VERSION_CACHE:
+                with open(metadata) as fh:
+                    distribution = Parser().parsestr(fh.read())
+                version = distribution.get('Version', '')
+                if distribution.get('Name', '').lower().replace('_', '-') != 'open-webui' or version_key(version) is None:
+                    return ''
+                _VERSION_CACHE.clear()
+                _VERSION_CACHE[identity] = version
+            return _VERSION_CACHE[identity]
+    except (OSError, ValueError):
+        return ''
+    return ''
 
 
 def read_install_state():
@@ -467,7 +473,7 @@ def require_stopped():
 def promote(venv, version, job_path, update=False):
     """Rollback executables/config on publication failure, never database contents."""
     safe_layout()
-    current_venv()  # Recheck foreign pointers/metadata after the long build.
+    previous = current_venv()  # Recheck after the long build.
     pointer = os.path.join(prefix(), "venv")
     old = os.readlink(pointer) if os.path.islink(pointer) else None
     snapshots = {}
@@ -545,6 +551,138 @@ def promote(venv, version, job_path, update=False):
         if failures:
             raise OSError(str(exc) + "; rollback incomplete: " + "; ".join(failures)) from exc
         raise
+    if previous != venv:
+        prune_venvs(venv, legacy or previous)
+
+
+def tree_identity(root, marker):
+    """Inventory without following links; added or changed user files block pruning."""
+    result = {}
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            relative = os.path.relpath(path, root)
+            if relative == marker:
+                continue
+            info = os.lstat(path)
+            result[relative] = [info.st_mode, info.st_size if not os.path.isdir(path) else 0,
+                                info.st_mtime_ns if not os.path.isdir(path) else 0,
+                                os.readlink(path) if os.path.islink(path) else '']
+    return result
+
+
+def venv_inventory_matches(root, marker, expected):
+    """Ignore only newly generated regular bytecode and cache directories.
+
+    Tracked cache entries still must match; links and noncache additions never
+    qualify. Inventories from before cleanup support are not adopted.
+    """
+    import stat
+    actual = tree_identity(root, marker)
+    for name in set(actual) - set(expected):
+        mode = actual[name][0]
+        if ((name.endswith('.pyc') and stat.S_ISREG(mode)) or
+                (os.path.basename(name) == '__pycache__' and stat.S_ISDIR(mode))):
+            del actual[name]
+    return actual == expected
+
+
+PROC_ROOT = '/proc'
+
+
+def versions_in_use(paths):
+    """Protect readable process references; defer on uncertain own processes."""
+    from pathlib import Path
+    needles = [os.fsencode(os.path.realpath(path)) for path in paths]
+    try:
+        for entry in Path(PROC_ROOT).iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                owner = entry.stat().st_uid
+            except FileNotFoundError:
+                continue
+            evidence, uncertain = [], False
+            for name in ('exe', 'cwd'):
+                try:
+                    link = entry / name
+                    if link.is_symlink():
+                        evidence.append(os.fsencode(os.readlink(link)))
+                except OSError:
+                    uncertain = True
+            try:
+                for link in (entry / 'fd').iterdir():
+                    try:
+                        evidence.append(os.fsencode(os.readlink(link)))
+                    except FileNotFoundError:
+                        continue  # A closed descriptor is no longer a reference.
+                    except OSError:
+                        uncertain = True
+            except OSError:
+                uncertain = True
+            for name in ('cmdline', 'environ', 'maps'):
+                try:
+                    evidence.append((entry / name).read_bytes())
+                except OSError:
+                    uncertain = True
+            if any(path in chunk for path in needles for chunk in evidence):
+                return True
+            if uncertain and owner == os.getuid():
+                try:
+                    entry.stat()
+                except FileNotFoundError:
+                    continue
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def prune_venvs(current, previous):
+    """Only remove unchanged, inventoried builds after a completed publication."""
+    root_fd = None
+    try:
+        root = safe_path(os.path.join(prefix(), 'venvs'))
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        keep = {os.path.realpath(p) for p in (current, previous) if p}
+        candidates = []
+        marker = '.omastrix-tree.json'
+        for name in os.listdir(root):
+            if not re.fullmatch(r'[a-f0-9]{32}', name):
+                continue
+            path = os.path.join(root, name)
+            if os.path.islink(path) or not os.path.isdir(path) or path in keep:
+                continue
+            try:
+                metadata = safe_path(os.path.join(path, marker))
+                with open(metadata) as fh:
+                    expected = json.load(fh)
+                if venv_inventory_matches(path, marker, expected):
+                    candidates.append(path)
+            except (OSError, ValueError):
+                continue
+        references = []
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            for name in dirs + files:
+                link = os.path.join(directory, name)
+                if os.path.islink(link):
+                    references.append((link, os.path.realpath(link)))
+        candidates = [path for path in candidates if not any(
+            (target == path or target.startswith(path + os.sep))
+            and not link.startswith(path + os.sep) for link, target in references)]
+        if not candidates or versions_in_use(candidates):
+            return
+        require_stopped()
+        for path in candidates:
+            if os.path.realpath(os.path.join(prefix(), 'venv')) == path:
+                return
+            if not os.path.islink(path) and venv_inventory_matches(path, marker, read_json(os.path.join(path, marker))):
+                shutil.rmtree(os.path.basename(path), dir_fd=root_fd)
+    except (OSError, ValueError):
+        pass  # Cleanup is optional; publication and rollback material take priority.
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def switch_pointer(venv):
@@ -583,6 +721,8 @@ def build_venv(uv, version, logfile):
             raise ValueError("Installed Open WebUI distribution version does not match " + version)
         library.atomic_json(os.path.join(venv, ".omastrix.json"),
                             {"schema": 1, "version": version, "python": PYTHON_VERSION})
+        library.atomic_json(os.path.join(venv, '.omastrix-tree.json'),
+                            tree_identity(venv, '.omastrix-tree.json'))
         return venv
     except BaseException:
         if os.path.isdir(venv):

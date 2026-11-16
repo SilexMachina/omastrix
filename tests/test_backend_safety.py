@@ -33,6 +33,9 @@ class IsolatedBackend(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         self.env.start()
         self.addCleanup(self.env.stop)
+        patcher = mock.patch.object(library, 'physical_ram_gib', return_value=128)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         # Any unanticipated process or HTTP operation fails rather than touching the host.
         for target in ("subprocess.run", "subprocess.call", "subprocess.Popen", "urllib.request.urlopen", "os.kill", "os.killpg"):
             patcher = mock.patch(target, side_effect=AssertionError("Unmocked external action: " + target))
@@ -212,12 +215,11 @@ class PathSafetyTests(IsolatedBackend):
             with self.subTest(model_id=model_id), self.assertRaises(ValueError):
                 library.write_download_state(model_id, {"pid": 0})
 
-    def test_models_root_symlink_cannot_redirect_downloads_or_deletions(self):
+    def test_models_root_symlink_resolves_to_selected_storage(self):
         outside = self.home / "unrelated-models"
         outside.mkdir()
         (self.home / "models").symlink_to(outside, target_is_directory=True)
-        with self.assertRaises(ValueError):
-            library.dest_for("test/model.gguf")
+        self.assertEqual(library.dest_for("test/model.gguf"), str(outside / 'test/model.gguf'))
 
     def test_model_paths_reject_aliases_and_symlinks(self):
         target = self.file()
@@ -235,10 +237,7 @@ class RouterSafetyTests(IsolatedBackend):
         path = request.call_args.args[0]
         query = library.urllib.parse.parse_qs(library.urllib.parse.urlsplit(path).query)
         self.assertEqual(query, {"autoload": ["false"], "model": [name]})
-        with mock.patch("urllib.request.urlopen", return_value=io.BytesIO(b"tokens_predicted_total 12\n")) as request:
-            self.assertEqual(library.token_count(name), 12)
-        query = library.urllib.parse.parse_qs(library.urllib.parse.urlsplit(request.call_args.args[0]).query)
-        self.assertEqual(query, {"autoload": ["false"], "model": [name]})
+
 
     def test_valid_pinned_router_inventory_preserves_exact_states(self):
         rows = [{"id": name, "status": {"value": state}} for name, state in
@@ -277,7 +276,7 @@ class RouterSafetyTests(IsolatedBackend):
 
     def test_load_cannot_race_download_publication(self):
         import fcntl
-        lock = self.home / ".local/state/omastrix/downloads.lock"
+        lock = self.home / ('.local/state/omastrix/downloads-' + self.row['id'] + '.lock')
         lock.parent.mkdir(parents=True)
         self.file()
         with lock.open("a") as fh, mock.patch.object(library, "server_list", return_value={}) as router:
@@ -411,7 +410,7 @@ class HostSafetyTests(IsolatedBackend):
                 snap = backend.snapshot()
                 self.assertEqual(snap.get("gtt_choices"), expected)
                 self.assertEqual(snap.get("app_version"), "0.5.0")
-                self.assertEqual(snap.get("supported_gtt"), expected)
+                self.assertNotIn('supported_gtt', snap)
                 self.assertEqual(snap["strix_halo"], driver == "amdgpu")
 
     def test_set_gtt_refuses_unsupported_choice_before_privilege_escalation(self):
@@ -725,7 +724,6 @@ class LibraryViewTests(IsolatedBackend):
         with mock.patch.object(library, "server_list", return_value={self.row["name"]: "loaded"}), \
              mock.patch.object(library, "recommend_id", return_value=self.row["id"]), \
              mock.patch.object(library, "slot_state", return_value=False), \
-             mock.patch.object(library, "token_count", return_value=None), \
              mock.patch.object(library, "service_ram_gb", return_value=16.4), \
              mock.patch.object(library, "sha256_file", side_effect=AssertionError("Snapshot must not hash weights")):
             row = library.library_view(110)["rows"][0]

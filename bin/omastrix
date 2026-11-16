@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OmaStrix host snapshot. Local sysfs only. Prints one JSON object."""
+"""OmaStrix status and action entry point. Emits JSON for panel requests."""
 
 import fcntl
 import glob
@@ -231,7 +231,7 @@ def pill(used, total, default):
     return "%d/%dG%s" % (round(used), round(total), mark)
 
 
-def host_probe():
+def host_probe(cached=False):
     devices = gpu_devices()
     device = devices[0] if devices else ""
     uevent = {}
@@ -242,7 +242,20 @@ def host_probe():
                 uevent[key] = value
     pci = (uevent.get("PCI_ID") or "").lower()
     slot = uevent.get("PCI_SLOT_NAME") or ""
-    name = lspci_name(slot)
+    name = None
+    cache_path = os.path.join(os.path.expanduser("~"), ".local/state/omastrix/hardware.json")
+    identity = [os.path.realpath(device), pci, slot, uevent.get("DRIVER", "")]
+    if cached and device:
+        saved = read_json(cache_path)
+        if saved.get("identity") == identity and isinstance(saved.get("name"), str):
+            name = saved["name"]
+    if name is None:
+        name = lspci_name(slot)
+        if cached and device:
+            try:
+                library.atomic_json(cache_path, {"identity": identity, "name": name})
+            except (OSError, ValueError):
+                pass
     halo = bool(device) and uevent.get("DRIVER") == "amdgpu" and is_strix_halo(pci, name)
     return device, uevent, pci, slot, name, halo
 
@@ -250,7 +263,7 @@ def host_probe():
 def snapshot():
     import plugin_update
 
-    device, uevent, pci, slot, name, halo = host_probe()
+    device, uevent, pci, slot, name, halo = host_probe(cached=True)
     mem_bytes = mem_total_bytes()
     gtt_total = read_int(os.path.join(device, "mem_info_gtt_total")) if device else None
     gtt_used = read_int(os.path.join(device, "mem_info_gtt_used")) if device else None
@@ -269,8 +282,15 @@ def snapshot():
     total_g = gib(gtt_total)
 
     pending = bool(choice) and choice != live_choice
-    lib = library.library_view(total_g)
-    library.write_preset(total_g)
+    try:
+        lib = library.library_view(total_g)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        lib = {"rows": [], "error": "Model library unavailable: " + str(exc)}
+    else:
+        try:
+            library.write_preset(total_g)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            lib["error"] = "Could not update engine presets: " + str(exc)
     pill_text = pill(used_g, total_g, default)
     if lib.get("loaded_short"):
         mark = "*" if lib.get("generating") else ""
@@ -287,7 +307,7 @@ def snapshot():
         "gtt_set": choice,
         "gtt_live": live_choice,
         "gtt_pending": pending,
-        "supported_gtt": supported_gtt_choices(halo, mem_bytes),
+        "gtt_requirements": {label: int(label) + library.RESERVE_GIB for label in GTT_CHOICES},
         "gtt_choices": supported_gtt_choices(halo, mem_bytes),
         "app_version": read_json(os.path.join(library.root_dir(), "manifest.json")).get("version") or "",
         "pages_limit": limit,
@@ -295,7 +315,7 @@ def snapshot():
         "pill": pill_text,
         "vertical": "GTT" if halo else "?",
         "plugin": plugin_update.status(),
-        "engine": engine_info(),
+        "engine": engine_info(hardware_supported=halo),
         "webui": webui_info(),
         "library": lib,
     }
@@ -436,7 +456,7 @@ def port_open():
     return any(line.split()[3].endswith(":8080") for line in (out.stdout or "").splitlines() if line.split())
 
 
-def engine_info():
+def engine_info(hardware_supported=None):
     paths = engine_paths()
     record = read_json(paths["record"])
     pin = read_json(paths["pin"])
@@ -454,7 +474,7 @@ def engine_info():
     is_updating = pid_alive(updating.get("pid"))
     return {
         "installed": installed,
-        "hardware_supported": host_probe()[-1],
+        "hardware_supported": host_probe()[-1] if hardware_supported is None else hardware_supported,
         "version": text_field(record, "version"),
         "build": build,
         "commit": text_field(record, "commit"),
@@ -717,6 +737,10 @@ def main():
             return 2
         arg = sys.argv[2] if len(sys.argv) > 2 else ""
         return engine_action(verb, arg)
+    if verb == "library-verify":
+        return emit_result(library.start_verify(sys.argv[2] if len(sys.argv) > 2 else ""))
+    if verb == "library-verify-run":
+        return library.verify(sys.argv[2] if len(sys.argv) > 2 else "")
     if verb == "library-fetch":
         return library.fetch(sys.argv[2] if len(sys.argv) > 2 else "")
     if verb == "library-add":

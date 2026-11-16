@@ -98,7 +98,7 @@ def main():
         elif args.command == "bump":
             bump(args.root, manifest, changelog, args.version, args.note, args.write)
         else:
-            print(f"OK: {manifest['version']} (metadata only; release approval still required)")
+            print(f"OK: {manifest['version']} (metadata only; no tag/release created)")
     except (OSError, ValueError) as exc:
         parser.exit(1, f"error: {exc}\n")
 

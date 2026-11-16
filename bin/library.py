@@ -1,7 +1,10 @@
 """Starter library. Reads ~/models. Does not download or load unless a verb asks."""
 
 import configparser
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
+import io
 import fcntl
 import functools
 import json
@@ -12,7 +15,6 @@ import secrets
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -43,12 +45,33 @@ def models_root():
     return os.path.join(os.path.expanduser("~"), "models")
 
 
+_operation_model_root: ContextVar[str | None] = ContextVar('operation_model_root', default=None)
+
+
+def canonical_models_root():
+    root = _operation_model_root.get()
+    return root if root is not None else os.path.realpath(models_root())
+
+
+@contextmanager
+def model_operation():
+    """Pin one canonical root across locks and nested calls, not operations."""
+    token = None
+    if _operation_model_root.get() is None:
+        token = _operation_model_root.set(os.path.realpath(models_root()))
+    try:
+        yield
+    finally:
+        if token is not None:
+            _operation_model_root.reset(token)
+
+
 def preset_path():
     return os.path.join(os.path.expanduser("~"), ".config/omastrix/models.ini")
 
 
 def state_dir():
-    path = os.path.join(os.path.expanduser("~"), ".local/state/omastrix/downloads")
+    path = checked_app_path(os.path.join(os.path.expanduser("~"), ".local/state/omastrix/downloads"))
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -69,7 +92,7 @@ def added_path():
 
 def load_added():
     try:
-        with open(added_path()) as fh:
+        with open(checked_app_path(added_path())) as fh:
             data = json.load(fh)
     except (OSError, json.JSONDecodeError):
         return []
@@ -77,8 +100,47 @@ def load_added():
     return models if isinstance(models, list) else []
 
 
+def checked_app_path(path, *, allow_leaf_link=False):
+    """Resolve user-managed prefixes, rejecting links within product storage.
+
+    Returns an absolute canonical-prefix path, without creating it. Call again
+    at each operation; validation alone is not a replacement for pinned writes.
+    """
+    path = os.fspath(path)
+    if not os.path.isabs(path) or any(p in ('.', '..') for p in path.split(os.sep)):
+        raise ValueError("app path must be absolute without traversal")
+    home = os.path.abspath(os.path.expanduser('~'))
+    prefixes = ('.config', '.local/state', '.local/share', '.local/bin')
+    for relative in prefixes:
+        prefix = os.path.join(home, relative)
+        resolved = os.path.realpath(prefix)
+        for candidate in (prefix, resolved):
+            if path.startswith(candidate + os.sep):
+                tail = path[len(candidate) + 1:]
+                parts = tail.split(os.sep)
+                if relative == '.local/bin':
+                    if not parts[0].startswith('omastrix'):
+                        continue
+                elif relative == '.config' and parts[:2] == ['systemd', 'user']:
+                    if len(parts) < 3 or not parts[2].startswith('omastrix'):
+                        continue
+                elif parts[0] != 'omastrix':
+                    continue
+                current = resolved
+                for index, part in enumerate(parts):
+                    current = os.path.join(current, part)
+                    if os.path.islink(current) and not (allow_leaf_link and index == len(parts) - 1):
+                        raise ValueError("app path contains a symlink")
+                return current
+    raise ValueError("path is outside app storage")
+
+
 def atomic_text(path, text, mode=0o644, *, reject_symlink=False):
     """Publish via a pinned directory, never following symlink ancestors."""
+    home = os.path.abspath(os.path.expanduser('~'))
+    if os.path.abspath(path).startswith(home + os.sep):
+        # Atomic replacement may replace a leaf link, but never follow it.
+        path = checked_app_path(path, allow_leaf_link=not reject_symlink)
     parent, name = os.path.split(os.path.abspath(path))
     directory = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY)
     temporary = None
@@ -122,26 +184,17 @@ def atomic_text(path, text, mode=0o644, *, reject_symlink=False):
 
 
 def atomic_json(path, data):
-    parent = os.path.dirname(path)
-    os.makedirs(parent, exist_ok=True)
-    tmp = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=parent, delete=False) as fh:
-            tmp = fh.name
-            json.dump(data, fh, indent=2)
-            fh.write("\n")
-        os.replace(tmp, path)
-    finally:
-        if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
+    text = io.StringIO()
+    json.dump(data, text, indent=2)
+    atomic_text(path, text.getvalue() + '\n', reject_symlink=True)
 
 
-def serialized(name, *, wait=False, worker=False, error_state=None):
+def serialized(name, *, wait=False, worker=False, error_state=None, propagate=False):
     """Serialize profile mutations; workers wait for their launcher to publish PID."""
     def decorate(fn):
         @functools.wraps(fn)
         def wrapped(*args, **kwargs):
-            path = os.path.join(os.path.expanduser("~"), ".local/state/omastrix", name + ".lock")
+            path = checked_app_path(os.path.join(os.path.expanduser("~"), ".local/state/omastrix", name + ".lock"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "a") as lock:
                 try:
@@ -155,6 +208,8 @@ def serialized(name, *, wait=False, worker=False, error_state=None):
                 try:
                     return fn(*args, **kwargs)
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    if propagate:
+                        raise
                     result = {"success": False, "error": str(exc)}
                     if error_state is not None:
                         try:
@@ -167,6 +222,40 @@ def serialized(name, *, wait=False, worker=False, error_state=None):
                     return result
                 finally:
                     fcntl.flock(lock, fcntl.LOCK_UN)
+        return wrapped
+    return decorate
+
+
+def model_mutation(*, worker=False, launcher=False):
+    """Lock model and canonical file names; unrelated recipes remain usable."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        @model_operation()
+        def wrapped(model_id, *args, **kwargs):
+            try:
+                download_path(model_id)  # Validate before constructing any lock name.
+                row, _ = find_model(model_id)
+                paths = sorted({dest_for(rel) for item in row['files']
+                                for rel in (item['path'], item['path'] + '.part')}) if row else []
+            except (OSError, ValueError) as exc:
+                result = {'success': False, 'error': str(exc)}
+                if worker:
+                    print(json.dumps(result))
+                    return 1
+                return result
+            if worker:
+                # Wait only for PID publication, never for another file worker.
+                serialized('launch-' + model_id, wait=True, propagate=True)(lambda: None)()
+            locked = fn
+            for path in reversed(paths):
+                key = hashlib.sha256(path.encode()).hexdigest()
+                locked = serialized('file-' + key, worker=worker,
+                                    error_state=(lambda *_a, **_k: download_path(model_id)) if worker else None)(locked)
+            locked = serialized('downloads-' + model_id, worker=worker,
+                                error_state=(lambda *_a, **_k: download_path(model_id)) if worker else None)(locked)
+            if launcher:
+                locked = serialized('launch-' + model_id)(locked)
+            return locked(model_id, *args, **kwargs)
         return wrapped
     return decorate
 
@@ -193,9 +282,7 @@ def dest_for(rel):
         part in ("", ".", "..") for part in rel.split(os.sep)
     ):
         raise ValueError("model path must be relative to ~/models")
-    if os.path.islink(models_root()):
-        raise ValueError("~/models must not be a symlink")
-    root = os.path.realpath(models_root())
+    root = canonical_models_root()
     dest = root
     for part in rel.split(os.sep):
         dest = os.path.join(dest, part)
@@ -231,7 +318,7 @@ def pid_alive(pid):
 def download_path(model_id, suffix=".json"):
     if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", model_id):
         raise ValueError("Invalid model ID for download state")
-    return os.path.join(state_dir(), model_id + suffix)
+    return checked_app_path(os.path.join(state_dir(), model_id + suffix))
 
 
 def download_state(model_id):
@@ -272,11 +359,33 @@ def row_files(row):
 
 def recommend_id(rows):
     by_id = {row["id"]: row for row in rows}
-    if not by_id["qwen38-27b"]["fits"]:
-        return "qwen35-9b"
-    if not by_id["qwen38-flash-next"]["fits"]:
-        return "qwen36-35b-a3b"
-    return "qwen38-27b"
+    preferred = 'qwen38-27b'
+    if not by_id.get(preferred, {}).get('fits'):
+        preferred = 'qwen35-9b'
+    elif not by_id.get('qwen38-flash-next', {}).get('fits'):
+        preferred = 'qwen36-35b-a3b'
+    if by_id.get(preferred, {}).get('fits'):
+        return preferred
+    return next((row['id'] for row in rows if row['fits']), None)
+
+
+def physical_ram_gib():
+    try:
+        with open('/proc/meminfo') as fh:
+            for line in fh:
+                if line.startswith('MemTotal:'):
+                    return int(line.split()[1]) / 1024**2
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def model_budget(gtt_total_gib, reserve: float = RESERVE_GIB):
+    """Weights and KV use GTT; the desktop reserve stays outside that ceiling."""
+    ram = physical_ram_gib()
+    if gtt_total_gib is None or ram is None:
+        return None
+    return max(0, min(float(gtt_total_gib), ram - reserve))
 
 
 def http_json(path, body=None, timeout=3):
@@ -344,7 +453,7 @@ def legacy_bindings(rows):
         by_name.setdefault(row["name"], []).append(row)
     saved = configparser.ConfigParser(interpolation=None)
     try:
-        with open(preset_path()) as fh:
+        with open(checked_app_path(preset_path())) as fh:
             saved.read_string("[header]\n" + fh.read())
     except (OSError, configparser.Error):
         saved = configparser.ConfigParser(interpolation=None)
@@ -355,7 +464,8 @@ def legacy_bindings(rows):
         if len(candidates) == 1:
             bindings[name] = candidates[0]["id"]
             continue
-        path = saved.get(name, "model", fallback="")
+        saved_path = saved.get(name, "model", fallback="")
+        path = os.path.realpath(saved_path) if saved_path else ''
         matches = [row for row in candidates if any(
             item.get("primary") and dest_for(item["path"]) == path
             for item in row["files"])]
@@ -382,8 +492,20 @@ def router_name(row, server, bindings=None):
     return alias if alias in server else model_id
 
 
+def check_shared_files_idle(row, server):
+    paths = {dest_for(item['path']) for item in row['files']}
+    rows = all_models()[0]
+    bindings = legacy_bindings(rows)
+    for other in rows:
+        if other['id'] == row['id']:
+            continue
+        if paths.intersection(dest_for(item['path']) for item in other['files']):
+            if server.get(router_name(other, server, bindings), 'unloaded') != 'unloaded':
+                raise ValueError('Unload the model sharing these files before changing them')
+
+
 def slot_state(name):
-    quoted = urllib.parse.quote(name)
+    quoted = urllib.parse.quote(name, safe='')
     data = http_json("/slots?autoload=false&model=" + quoted, timeout=3)
     generating = False
     if isinstance(data, list):
@@ -391,29 +513,12 @@ def slot_state(name):
     return generating
 
 
-def token_count(name):
-    quoted = urllib.parse.quote(name)
-    url = "http://%s:%s/metrics?autoload=false&model=%s" % (HOST, PORT, quoted)
-    try:
-        with urllib.request.urlopen(url, timeout=3) as resp:
-            text = resp.read().decode("utf-8", "replace")
-    except Exception:
-        return None
-    for line in text.splitlines():
-        if line.startswith("tokens_predicted_total"):
-            part = line.split()[-1]
-            try:
-                return int(float(part))
-            except ValueError:
-                return None
-    return None
-
-
 def service_ram_gb():
     uid = os.getuid()
     path = "/sys/fs/cgroup/user.slice/user-%s.slice/user@%s.service/app.slice/omastrix-llama.service/memory.current" % (uid, uid)
     try:
-        raw = int(open(path).read().strip())
+        with open(path) as fh:
+            raw = int(fh.read().strip())
     except (OSError, ValueError):
         return None
     return round(raw / 1024**3, 1)
@@ -440,7 +545,7 @@ def parameter_label(row):
 
 def read_ledger():
     try:
-        with open(ledger_path()) as fh:
+        with open(checked_app_path(ledger_path())) as fh:
             return json.load(fh)
     except (OSError, json.JSONDecodeError):
         return {}
@@ -448,6 +553,7 @@ def read_ledger():
 
 def library_view(gtt_total_gib):
     models, reserve = all_models()
+    budget = model_budget(gtt_total_gib, reserve)
     server = server_list()
     bindings = legacy_bindings(models)
     rows = []
@@ -455,9 +561,9 @@ def library_view(gtt_total_gib):
         files, have, need = row_files(row)
         installed = all(item["ready"] for item in files)
         weight = need / 1024**3
-        need_gib = weight + float(row["kv_gib"]) + reserve
-        fits = gtt_total_gib is not None and need_gib <= float(gtt_total_gib)
-        shortfall = 0 if fits or gtt_total_gib is None else round(need_gib - float(gtt_total_gib), 1)
+        need_gib = weight + float(row["kv_gib"])
+        fits = budget is not None and need_gib <= budget
+        shortfall = 0 if fits or budget is None else round(need_gib - budget, 1)
         state = download_state(row["id"])
         status = "not_installed"
         if installed:
@@ -506,10 +612,8 @@ def library_view(gtt_total_gib):
     fitting.sort(key=lambda row: (0 if row["recommended"] else 1, rows.index(row)))
     loaded = next((row for row in rows if row["server_status"] == "loaded"), None)
     generating = False
-    tokens = None
     if loaded:
         generating = slot_state(loaded["router_name"])
-        tokens = token_count(loaded["router_name"])
     ram = service_ram_gb() if loaded else None
     for row in rows:
         row["engine_name"] = "strix-llama.cpp"
@@ -541,14 +645,21 @@ def library_view(gtt_total_gib):
         "loaded_name": loaded["name"] if loaded else "",
         "loaded_short": loaded["short"] if loaded else "",
         "generating": generating,
-        "tokens_since_load": tokens,
-        "tokens_note": "" if tokens is not None or not loaded else "Token count unavailable",
     }
 
 
+@model_operation()
 def preset_text(gtt_total_gib=None):
     rows, reserve = all_models()
+    budget = model_budget(gtt_total_gib, reserve)
     bindings = legacy_bindings(rows)
+    server = server_list() or {}
+    saved = configparser.ConfigParser(interpolation=None)
+    try:
+        with open(checked_app_path(preset_path())) as fh:
+            saved.read_string('[header]\n' + fh.read())
+    except (OSError, configparser.Error):
+        pass
     lines = [
         "version = 1",
         "",
@@ -565,15 +676,14 @@ def preset_text(gtt_total_gib=None):
         files, _have, need = row_files(row)
         if not all(item["ready"] for item in files):
             continue
-        if gtt_total_gib is not None:
-            need_gib = need / 1024**3 + float(row["kv_gib"]) + reserve
-            if need_gib > float(gtt_total_gib):
-                continue
+        need_gib = need / 1024**3 + float(row["kv_gib"])
         primary = next(item for item in row["files"] if item.get("primary"))
-        # IDs are canonical. Retained aliases keep a live legacy router/preset
-        # usable during periodic snapshots; writing never reloads the router.
-        names = [row["id"]] + [name for name, model_id in bindings.items()
-                                 if model_id == row["id"]]
+        names = [row['id']] if budget is not None and need_gib <= budget else []
+        # Retain only observed loaded aliases, including when fit is unavailable.
+        names += [name for name, model_id in bindings.items()
+                  if model_id == row["id"] and saved.has_section(name)
+                  and server.get(name) == 'loaded'
+                  and os.path.realpath(saved.get(name, 'model', fallback='')) == dest_for(primary['path'])]
         for name in names:
             lines.append("[%s]" % name)
             lines.append("model = %s" % dest_for(primary["path"]))
@@ -584,9 +694,18 @@ def preset_text(gtt_total_gib=None):
     return "\n".join(lines)
 
 
+@serialized('preset', wait=True, propagate=True)
+@model_operation()
 def write_preset(gtt_total_gib=None):
-    path = preset_path()
-    atomic_text(path, preset_text(gtt_total_gib), reject_symlink=True)
+    path = checked_app_path(preset_path())
+    text = preset_text(gtt_total_gib)
+    try:
+        with open(path) as fh:
+            if fh.read() == text:
+                return path
+    except FileNotFoundError:
+        pass
+    atomic_text(path, text, reject_symlink=True)
     return path
 
 
@@ -596,13 +715,60 @@ def reload_server():
 
 def sha256_file(path):
     digest = hashlib.sha256()
-    with open(path, "rb") as fh:
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as fh:
         while True:
             chunk = fh.read(1024 * 1024)
             if not chunk:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def file_identity(path):
+    info = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('model is not a regular file')
+    return dict(zip(('dev', 'ino', 'size', 'mtime_ns', 'ctime_ns'),
+                    (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)))
+
+
+def verified_path():
+    return checked_app_path(os.path.join(os.path.expanduser('~'), '.local/state/omastrix/verified.json'))
+
+
+def read_verified():
+    try:
+        with open(verified_path()) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+@serialized('verified', wait=True)
+def record_verified(path, identity, digest):
+    if file_identity(path) != identity:
+        raise ValueError('Model changed during hash verification')
+    cache = read_verified()
+    cache[path] = {**identity, 'sha256': digest}
+    atomic_json(verified_path(), cache)
+    return {'success': True}
+
+
+def verify_file(item, *, force=False):
+    path = dest_for(item['path'])
+    expected = item.get('sha256')
+    if not expected:
+        return False
+    before = file_identity(path)
+    if before['size'] != item['bytes']:
+        return False
+    if not force and read_verified().get(path) == {**before, 'sha256': expected}:
+        return file_identity(path) == before
+    digest = sha256_file(path)
+    if file_identity(path) != before or digest != expected:
+        return False
+    return record_verified(path, before, digest).get('success') is True
 
 
 def params_from_name(name):
@@ -728,8 +894,7 @@ def add_from_url(raw):
     }
 
 
-@serialized("downloads", wait=True, worker=True,
-            error_state=lambda model_id: download_path(model_id))
+@model_mutation(worker=True)
 def fetch(model_id):
     row, _reserve = find_model(model_id)
     if row is None:
@@ -746,13 +911,17 @@ def fetch(model_id):
             raise ValueError("Cannot confirm engine state; no model files were changed")
     elif server.get(router_name(row, server), "unloaded") != "unloaded":
         raise ValueError("Unload this model before downloading or verifying its files")
-    os.makedirs(models_root(), exist_ok=True)
+    if server is not None:
+        check_shared_files_idle(row, server)
+    os.makedirs(canonical_models_root(), exist_ok=True)
     for item in row["files"]:
         dest = dest_for(item["path"])
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         partial = dest_for(item["path"] + ".part")
         if os.path.isfile(dest) and file_bytes(dest) != item["bytes"]:
             os.replace(dest, partial)
+        if file_bytes(partial) > item['bytes']:
+            os.remove(partial)
         candidate = dest if file_bytes(dest) == item["bytes"] else partial
         code = 0
         if file_bytes(candidate) != item["bytes"]:
@@ -772,7 +941,10 @@ def fetch(model_id):
             })
             print(json.dumps({"success": False, "error": "Download incomplete"}))
             return 1
+        identity = file_identity(candidate)
         digest = sha256_file(candidate)
+        if file_identity(candidate) != identity:
+            raise ValueError('Model changed during hash verification')
         expected = item.get("sha256") or ""
         if expected and digest != expected:
             if candidate == dest:
@@ -790,13 +962,35 @@ def fetch(model_id):
                 raise ValueError(recorded.get("error") or "Could not record model hash")
         if candidate != dest:
             os.replace(candidate, dest)
+        published = file_identity(dest)
+        if any(published[key] != identity[key] for key in ('dev', 'ino', 'size', 'mtime_ns')):
+            raise ValueError('Model changed during publication')
+        if candidate != dest:
+            # Rename changes ctime, so the pre-rename identity cannot prove
+            # the published bytes. Bind the cache to a post-publication read.
+            if sha256_file(dest) != digest or file_identity(dest) != published:
+                raise ValueError('Model changed during publication')
+        elif published != identity:
+            raise ValueError('Model changed during publication')
+        recorded = record_verified(dest, published, digest)
+        if recorded.get('success') is not True:
+            raise ValueError(recorded.get('error') or 'Could not save verified identity')
     write_download_state(model_id, {"pid": 0, "error": ""})
     print(json.dumps({"success": True, "message": row["name"] + " installed."}))
     return 0
 
 
-@serialized("downloads")
+@model_mutation(launcher=True)
 def start_download(model_id):
+    return start_file_worker(model_id, 'library-fetch', 'Downloading')
+
+
+@model_mutation(launcher=True)
+def start_verify(model_id):
+    return start_file_worker(model_id, 'library-verify-run', 'Verifying')
+
+
+def start_file_worker(model_id, verb, label):
     row, _reserve = find_model(model_id)
     if row is None:
         return {"success": False, "error": "Unknown model"}
@@ -806,13 +1000,28 @@ def start_download(model_id):
         return {"success": True, "message": row["name"] + " is already downloading."}
     with open(download_path(model_id, ".log"), "ab") as log:
         proc = subprocess.Popen(
-            [os.path.join(root_dir(), "bin/omastrix"), "library-fetch", model_id],
+            [os.path.join(root_dir(), "bin/omastrix"), verb, model_id],
             start_new_session=True,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
     write_download_state(model_id, {"pid": proc.pid, "error": ""})
-    return {"success": True, "message": "Downloading " + row["name"] + " into ~/models."}
+    return {"success": True, "message": label + ' ' + row["name"] + " into ~/models."}
+
+
+@model_mutation(worker=True)
+def verify(model_id):
+    """Explicit read-only verification, bypassing cached file identities."""
+    row, _ = find_model(model_id)
+    if row is None:
+        raise ValueError('Unknown model')
+    write_download_state(model_id, {'pid': os.getpid(), 'error': ''})
+    for item in row['files']:
+        if not verify_file(item, force=True):
+            raise ValueError('Model hash verification failed')
+    write_download_state(model_id, {'pid': 0, 'error': ''})
+    print(json.dumps({'success': True, 'message': row['name'] + ' verified.'}))
+    return 0
 
 
 def loaded_name():
@@ -850,12 +1059,11 @@ def unload_name(name):
     return http_json("/models/unload", {"model": name}, timeout=30)
 
 
-# Lock order for combined operations: engine -> router -> downloads -> added.
-# Never wait for an earlier lock while holding a later one. Engine installers
-# hold only engine; fetch workers hold downloads (then added for saved hashes).
+# Lock order: engine -> router -> model -> sorted files -> metadata.
+# Fetch workers never acquire engine/router while holding model/file locks.
 @serialized("engine")
 @serialized("router")
-@serialized("downloads")
+@model_mutation()
 def load_checked(model_id, gtt_total_gib, confirm):
     row, reserve = find_model(model_id)
     if row is None:
@@ -864,9 +1072,10 @@ def load_checked(model_id, gtt_total_gib, confirm):
     if not all(item["ready"] for item in files):
         return {"success": False, "id": model_id, "error": row["name"] + " is not installed."}
     weight = need / 1024**3
-    need_gib = weight + float(row["kv_gib"]) + reserve
-    if gtt_total_gib is None or need_gib > float(gtt_total_gib):
-        shortfall = None if gtt_total_gib is None else round(need_gib - float(gtt_total_gib), 1)
+    need_gib = weight + float(row["kv_gib"])
+    budget = model_budget(gtt_total_gib, reserve)
+    if budget is None or need_gib > budget:
+        shortfall = None if budget is None else round(need_gib - budget, 1)
         return {
             "success": False,
             "id": model_id,
@@ -876,7 +1085,7 @@ def load_checked(model_id, gtt_total_gib, confirm):
         }
     for item in row["files"]:
         expected = item.get("sha256")
-        if not expected or sha256_file(dest_for(item["path"])) != expected:
+        if not expected or not verify_file(item):
             return {"success": False, "id": model_id, "error": "Model hash verification failed; install the model again."}
     server = server_list()
     if server is None:
@@ -906,7 +1115,7 @@ def load_checked(model_id, gtt_total_gib, confirm):
             return {"success": False, "id": model_id, "error": "Previous model did not unload."}
     if target not in (server_list() or {}):
         reload_server()
-    quoted = urllib.parse.quote(target)
+    quoted = urllib.parse.quote(target, safe='')
     result = http_json("/props?model=" + quoted, timeout=600)
     if result.get("error"):
         return {"success": False, "id": model_id, "error": result["error"]}
@@ -953,7 +1162,7 @@ def catalog_paths(row):
 
 
 def remove_catalog_file(dest):
-    root = os.path.realpath(models_root())
+    root = canonical_models_root()
     real = os.path.realpath(dest)
     if real != root and not real.startswith(root + os.sep):
         raise ValueError("refusing to delete outside ~/models")
@@ -963,7 +1172,7 @@ def remove_catalog_file(dest):
 
 
 def prune_empty_dirs(start):
-    root = os.path.realpath(models_root())
+    root = canonical_models_root()
     path = os.path.realpath(start)
     while path != root and path.startswith(root + os.sep):
         try:
@@ -1007,7 +1216,7 @@ def stop_download(model_id):
 
 
 @serialized("router")
-@serialized("downloads")
+@model_mutation()
 def delete_model(model_id, gtt_total_gib, confirm):
     row, _reserve = find_model(model_id)
     if row is None:
@@ -1020,6 +1229,8 @@ def delete_model(model_id, gtt_total_gib, confirm):
         return {"success": False, "id": model_id, "error": row["name"] + " is not installed."}
     server = server_list()
     target = router_name(row, server) if server is not None else row["id"]
+    if server is not None:
+        check_shared_files_idle(row, server)
     loaded_this = server is not None and server.get(target) == "loaded"
     if not confirm:
         if loaded_this:
@@ -1077,6 +1288,8 @@ def main(argv):
     verb = argv[1] if len(argv) > 1 else ""
     if verb == "library-fetch" and len(argv) > 2:
         return fetch(argv[2])
+    if verb == 'library-verify-run' and len(argv) > 2:
+        return verify(argv[2])
     print("library helper", file=sys.stderr)
     return 2
 

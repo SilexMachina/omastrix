@@ -16,6 +16,17 @@ function actionName(text, context) {
   return context ? text + " " + context : text;
 }
 
+function gttChoiceTooltip(value, snapshot, busy) {
+  if (busy) return "Wait for the current operation";
+  if (snapshot.strix_halo !== true) return "Requires supported Strix Halo hardware";
+  if ((snapshot.gtt_choices || []).indexOf(String(value)) >= 0) return "Configure the GTT ceiling";
+  var required = (snapshot.gtt_requirements || {})[String(value)];
+  var memory = snapshot.mem_total_gib;
+  var detected = typeof memory === "number" && isFinite(memory) ? memory.toFixed(1) + " GiB" : "unavailable";
+  return (required ? "Requires at least " + required + " GiB of system memory" : "Requires more system memory")
+    + "; detected " + detected + ". BIOS dedicated VRAM / UMA settings can reduce available RAM.";
+}
+
 function formatGttUsed(value) {
   if ((typeof value !== "number" && typeof value !== "string") || String(value).trim() === "") return "—";
   var used = Number(value);
